@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 
-import type { JsonObject } from "./protocol.js";
+import type { AgentToClientMessage, JsonObject, TaskEvent, TaskRef, TasksCreatedMessage } from "./protocol.js";
 import { parseAgentMdx } from "./agent-mdx.js";
+import { spawnLocalAgent } from "./local-runtime.js";
 
 export type AuthKind = "none" | "bearer" | "apiKey";
 
@@ -332,8 +333,121 @@ export interface RegisteredAgentRef {
   getAuthHeaders: () => Record<string, string>;
 }
 
+export type TAgentRequest =
+  | string
+  | {
+      agentId?: string;
+      prompt: string;
+    };
+
+export interface TaskResult {
+  /**
+   * Task id (stable for the lifetime of the Task).
+   *
+   * For local CLI agents, this is generated client-side.
+   */
+  taskId: string;
+  /** The resolved agent id used for execution. */
+  agentId: string;
+  /** Convenience: combined assistant text output (if any). */
+  text: string;
+  /** Provider task reference when available. */
+  task?: TaskRef;
+  /** Captured events for debugging/inspection (best-effort). */
+  events?: TaskEvent[];
+}
+
+export class TaskHandle {
+  private started = false;
+  private readonly resultPromise: Promise<TaskResult>;
+
+  constructor(run: () => Promise<TaskResult>) {
+    this.resultPromise = (async () => {
+      this.started = true;
+      return await run();
+    })();
+  }
+
+  async result(): Promise<TaskResult> {
+    return await this.resultPromise;
+  }
+
+  async response(): Promise<string> {
+    const r = await this.result();
+    return r.text;
+  }
+
+  /** True once the underlying execution has begun. */
+  get isStarted(): boolean {
+    return this.started;
+  }
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeAgentRequest(request: TAgentRequest): { agentId?: string; prompt: string } {
+  if (typeof request === "string") return { prompt: request };
+  if (!isObjectRecord(request)) throw new Error("Invalid request: expected string or { prompt, agentId? }");
+  const prompt = request.prompt;
+  if (typeof prompt !== "string") throw new Error("Invalid request.prompt: expected string");
+  const agentId = request.agentId;
+  if (agentId !== undefined && typeof agentId !== "string") throw new Error("Invalid request.agentId: expected string");
+  return { agentId, prompt };
+}
+
+function isTaskEvent(msg: AgentToClientMessage): msg is TaskEvent {
+  return (
+    !!msg &&
+    typeof msg === "object" &&
+    typeof (msg as { type?: unknown }).type === "string" &&
+    (((msg as { type: string }).type.startsWith("task.") ||
+      (msg as { type: string }).type.startsWith("message.") ||
+      (msg as { type: string }).type.startsWith("artifact.")) as boolean)
+  );
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      const t = setTimeout(() => reject(new Error(`Timeout: ${label}`)), ms);
+      // Avoid keeping the event loop alive on Node versions that support it.
+      (t as unknown as { unref?: () => void }).unref?.();
+    })
+  ]);
+}
+
+async function nextMessage(iter: AsyncIterator<unknown>, label: string): Promise<AgentToClientMessage> {
+  const res = await withTimeout(iter.next(), 2000, label);
+  if (res.done) throw new Error(`Unexpected end of stream while waiting for ${label}`);
+  return res.value as AgentToClientMessage;
+}
+
+async function waitForTasksCreated(iter: AsyncIterator<unknown>, taskId: string): Promise<TasksCreatedMessage> {
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const msg = await nextMessage(iter, `tasks/created for task "${taskId}"`);
+    if (msg.type === "tasks/error" && (msg as { taskId?: unknown }).taskId === taskId) {
+      throw new Error((msg as { error?: unknown }).error ? String((msg as { error?: unknown }).error) : "tasks/error");
+    }
+    if (msg.type === "tasks/created") {
+      const created = msg as TasksCreatedMessage;
+      if (created.task?.id === taskId) return created;
+    }
+  }
+}
+
 export class Agnet {
   private readonly byId = new Map<string, RegisteredAgentRef>();
+  readonly tasks: { create: (request: TAgentRequest) => TaskHandle };
+
+  constructor() {
+    this.tasks = {
+      create: (request: TAgentRequest) => this.createTask(request)
+    };
+  }
 
   register(input: AgentRegistrationInput, opts: RegisterOptions = {}): RegisteredAgentRef {
     if (typeof input === "string") {
@@ -396,6 +510,142 @@ export class Agnet {
 
   listAgents(): AgentCard[] {
     return this.list().map((r) => r.card);
+  }
+
+  /**
+   * Human-style API (text only).
+   *
+   * Syntax sugar for: `agnet.tasks.create(request).response()`
+   */
+  async ask(request: TAgentRequest): Promise<string> {
+    return await this.tasks.create(request).response();
+  }
+
+  /**
+   * Computer-style API (structured result).
+   *
+   * Syntax sugar for: `agnet.tasks.create(request).result()`
+   */
+  async prompt(request: TAgentRequest): Promise<TaskResult> {
+    return await this.tasks.create(request).result();
+  }
+
+  private resolveDefaultAgentId(): string {
+    const agents = this.list();
+    if (agents.length === 0) {
+      throw new Error('No agents registered. Register an agent or provide { agentId, prompt }.');
+    }
+
+    const isDefault = (ref: RegisteredAgentRef): boolean =>
+      isObjectRecord(ref.card.extensions) && (ref.card.extensions as Record<string, unknown>).default === true;
+
+    for (let i = agents.length - 1; i >= 0; i--) {
+      if (isDefault(agents[i])) return agents[i].id;
+    }
+    return agents[agents.length - 1].id;
+  }
+
+  private resolveAgentForExecution(agentId?: string): RegisteredAgentRef {
+    const resolvedId = agentId ?? this.resolveDefaultAgentId();
+    const ref = this.get(resolvedId);
+    if (!ref) throw new Error(`Unknown agent: ${resolvedId}`);
+    return ref;
+  }
+
+  private createTask(request: TAgentRequest): TaskHandle {
+    const normalized = normalizeAgentRequest(request);
+    const ref = this.resolveAgentForExecution(normalized.agentId);
+
+    if (!ref.runtime) {
+      throw new Error(`Agent "${ref.id}" is missing runtime config (cannot execute tasks).`);
+    }
+    if (ref.runtime.transport !== "cli") {
+      throw new Error(`Agent "${ref.id}" runtime transport "${ref.runtime.transport}" is not supported for tasks.create yet.`);
+    }
+
+    const runtime = ref.runtime;
+    const prompt = normalized.prompt;
+    const taskId = `task-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+
+    return new TaskHandle(async () => {
+      const conn = spawnLocalAgent({
+        command: runtime.command,
+        args: Array.isArray(runtime.args) ? runtime.args : [],
+        cwd: runtime.cwd,
+        env: process.env
+      });
+
+      const events: TaskEvent[] = [];
+      try {
+        const iter = conn.transport[Symbol.asyncIterator]();
+
+        // Handshake.
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          const msg = await nextMessage(iter, "ready");
+          if (msg.type === "ready") break;
+        }
+
+        await conn.transport.send({
+          type: "tasks/create",
+          taskId,
+          agentId: ref.id,
+          prompt
+        });
+        const created = await waitForTasksCreated(iter, taskId);
+
+        await conn.transport.send({ type: "tasks/subscribe", taskId });
+
+        const deltasByIndex = new Map<number, string>();
+        let finalTask: TaskRef | undefined;
+
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          const msg = await nextMessage(iter, `task completion for "${taskId}"`);
+
+          if (msg.type === "tasks/error" && (msg as { taskId?: unknown }).taskId === taskId) {
+            throw new Error((msg as { error?: unknown }).error ? String((msg as { error?: unknown }).error) : "tasks/error");
+          }
+
+          if (!isTaskEvent(msg)) continue;
+          if (msg.taskId !== taskId) continue;
+          events.push(msg);
+
+          if (msg.type === "message.delta") {
+            const idx = typeof msg.index === "number" ? msg.index : deltasByIndex.size;
+            deltasByIndex.set(idx, msg.delta ?? "");
+            continue;
+          }
+
+          if (msg.type === "task.completed") {
+            finalTask = msg.task;
+            break;
+          }
+          if (msg.type === "task.cancelled") {
+            finalTask = msg.task;
+            throw new Error(`Task cancelled: ${taskId}`);
+          }
+          if (msg.type === "task.failed") {
+            throw new Error(msg.error);
+          }
+        }
+
+        const text = [...deltasByIndex.entries()]
+          .sort((a, b) => a[0] - b[0])
+          .map(([, d]) => d)
+          .join("");
+
+        return {
+          taskId,
+          agentId: ref.id,
+          text,
+          task: finalTask ?? created.task,
+          events
+        };
+      } finally {
+        await conn.close();
+      }
+    });
   }
 }
 
