@@ -1,20 +1,20 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { createInterface } from "node:readline/promises";
 
-import { Api } from "../api/api.js";
-import type { ApiArgMeta, ApiEndpointMeta } from "../api/registry.js";
-import { getRegisteredEndpoints, resolveHandlerInstance } from "../api/registry.js";
-import { ChatsApi } from "../apis/chats-api.js";
-import { ProvidersApi } from "../apis/providers-api.js";
-import { ShortcutsApi } from "../apis/shortcuts-api.js";
+import { createApp, createAppContext } from "../app.js";
+import { flattenApiSchema } from "../internal/api-schema.js";
 import { toErrorMessage } from "../internal/utils.js";
+import { tokenizeCommandLine } from "./command-line.js";
 
 function endpointPathTokens(endpointId: string): string[] {
   return endpointId.split(".").filter(Boolean);
 }
 
-function usage(endpoints: ApiEndpointMeta[]): string {
+type CliEndpoint = ReturnType<typeof flattenApiSchema>[number];
+
+function usage(endpoints: CliEndpoint[]): string {
   const lines: string[] = [];
   lines.push("Agnet CLI", "");
   lines.push("Usage:");
@@ -32,7 +32,14 @@ function usage(endpoints: ApiEndpointMeta[]): string {
       .join(" ");
     lines.push(`  ${path}${args ? " " + args : ""}`);
   }
-  lines.push("", 'Notes:', '  - Use "--help" for this message.');
+  lines.push(
+    "",
+    "Global options:",
+    "  --interactive, -i  Start interactive mode",
+    "",
+    "Notes:",
+    '  - Use "--help" for this message.'
+  );
   return lines.join("\n");
 }
 
@@ -111,10 +118,10 @@ function argKeyFromFlag(flag: string): string {
   return flag.startsWith("--") ? flag.slice(2) : flag;
 }
 
-function parseEndpointArgs(params: {
-  endpoint: ApiEndpointMeta;
+function parseEndpointInput(params: {
+  endpoint: CliEndpoint;
   argvAfterCommand: string[];
-}): unknown[] {
+}): unknown {
   const firstFlagIdx = params.argvAfterCommand.findIndex((t) => t.startsWith("--"));
   const commandTail =
     firstFlagIdx === -1 ? params.argvAfterCommand : params.argvAfterCommand.slice(0, firstFlagIdx);
@@ -125,7 +132,7 @@ function parseEndpointArgs(params: {
   const allPositional = [...commandTail, ...positional];
 
   // Build a lookup for known flags to their arg meta.
-  const byFlag = new Map<string, ApiArgMeta>();
+  const byFlag = new Map<string, CliEndpoint["args"][number]>();
   for (const arg of params.endpoint.args) {
     if (arg.cli?.flag) byFlag.set(argKeyFromFlag(arg.cli.flag), arg);
     for (const alias of arg.cli?.aliases ?? []) byFlag.set(argKeyFromFlag(alias), arg);
@@ -172,9 +179,7 @@ function parseEndpointArgs(params: {
     if (!byFlag.has(k)) throw new Error(`Unknown flag: --${k}`);
   }
 
-  const maxIndex =
-    params.endpoint.args.reduce((m, a) => Math.max(m, a.parameterIndex), -1) + 1;
-  const out: unknown[] = new Array(maxIndex).fill(undefined);
+  const out: Record<string, unknown> = {};
 
   for (const arg of params.endpoint.args) {
     let raw: unknown = undefined;
@@ -197,34 +202,33 @@ function parseEndpointArgs(params: {
         const hint = arg.cli?.flag ? ` (${arg.cli.flag})` : "";
         throw new Error(`Missing required argument: ${arg.name}${hint}`);
       }
-      out[arg.parameterIndex] = undefined;
       continue;
     }
 
-    if (arg.type === "boolean") out[arg.parameterIndex] = coerceBoolean(raw, arg.name);
+    if (arg.type === "boolean") out[arg.name] = coerceBoolean(raw, arg.name);
     else if (arg.type === "string") {
       if (raw === true) throw new Error(`Missing value for ${arg.cli?.flag ?? arg.name}`);
-      out[arg.parameterIndex] = coerceString(raw, arg.name);
+      out[arg.name] = coerceString(raw, arg.name);
     } else if (arg.type === "string[]") {
-      if (raw === true) out[arg.parameterIndex] = [];
-      else out[arg.parameterIndex] = coerceStringArray(raw, arg.name);
+      if (raw === true) out[arg.name] = [];
+      else out[arg.name] = coerceStringArray(raw, arg.name);
     } else {
       // Exhaustiveness.
-      out[arg.parameterIndex] = raw;
+      out[arg.name] = raw;
     }
   }
 
-  return out;
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
-function selectEndpoint(endpoints: ApiEndpointMeta[], argvTokens: string[]): { endpoint: ApiEndpointMeta; pathLen: number } | undefined {
+function selectEndpoint(endpoints: CliEndpoint[], argvTokens: string[]): { endpoint: CliEndpoint; pathLen: number } | undefined {
   const commandTokens: string[] = [];
   for (const t of argvTokens) {
     if (t.startsWith("--")) break;
     commandTokens.push(t);
   }
 
-  let best: { endpoint: ApiEndpointMeta; pathLen: number } | undefined;
+  let best: { endpoint: CliEndpoint; pathLen: number } | undefined;
   for (const ep of endpoints) {
     const p = endpointPathTokens(ep.id);
     if (p.length === 0) continue;
@@ -255,56 +259,133 @@ async function printStream(iterable: AsyncIterable<unknown>): Promise<void> {
   }
 }
 
-export async function runCli(argv: string[]): Promise<void> {
-  // Ensure endpoints are registered.
-  const entryPath = argv[1];
-  const mockAgentPathCandidate =
-    typeof entryPath === "string" && entryPath.length > 0
-      ? path.resolve(path.dirname(entryPath), "mock-agent.mjs")
-      : "";
-  const mockAgentPath = existsSync(mockAgentPathCandidate)
-    ? mockAgentPathCandidate
-    : path.resolve(process.cwd(), "bin", "mock-agent.mjs");
-  const ctx = { cwd: process.cwd(), env: process.env, mockAgentPath };
-  Api.registerHandlerFactory(ProvidersApi, () => new ProvidersApi(ctx));
-  Api.registerHandlerFactory(ChatsApi, () => new ChatsApi(ctx));
-  Api.registerHandlerFactory(ShortcutsApi, () => new ShortcutsApi(ctx));
+function getByPath(obj: any, pathTokens: string[]): unknown {
+  let cur: any = obj;
+  for (const k of pathTokens) cur = cur?.[k];
+  return cur;
+}
 
-  const endpoints = getRegisteredEndpoints();
-  const publicEndpoints = endpoints.filter((e) => !e.internal);
-  const tokens = argv.slice(2);
-
-  if (tokens.length === 0 || tokens.includes("--help") || tokens.includes("-h")) {
-    process.stdout.write(usage(publicEndpoints) + "\n");
+async function dispatchOnce(params: {
+  app: unknown;
+  endpoints: CliEndpoint[];
+  publicEndpoints: CliEndpoint[];
+  tokens: string[];
+  strictExitCode: boolean;
+}): Promise<void> {
+  if (params.tokens.length === 0 || params.tokens.includes("--help") || params.tokens.includes("-h")) {
+    process.stdout.write(usage(params.publicEndpoints) + "\n");
     return;
   }
 
-  const selected = selectEndpoint(endpoints, tokens);
+  const selected = selectEndpoint(params.endpoints, params.tokens);
   if (!selected) {
-    process.stderr.write(usage(publicEndpoints) + "\n");
-    process.exitCode = 1;
+    process.stderr.write(usage(params.publicEndpoints) + "\n");
+    if (params.strictExitCode) process.exitCode = 1;
     return;
   }
 
-  const argvAfterCommand = tokens.slice(selected.pathLen);
+  const argvAfterCommand = params.tokens.slice(selected.pathLen);
 
   try {
-    const args = parseEndpointArgs({ endpoint: selected.endpoint, argvAfterCommand });
-    const handler = resolveHandlerInstance(selected.endpoint.handlerClass) as Record<string | symbol, unknown>;
-    const fn = handler[selected.endpoint.handlerMethodName];
+    const input = parseEndpointInput({ endpoint: selected.endpoint, argvAfterCommand });
+    const fn = getByPath(params.app as any, selected.endpoint.callPath);
     if (typeof fn !== "function") {
       throw new Error(`Handler method not found for endpoint "${selected.endpoint.id}"`);
     }
 
-    const res = (fn as (...a: unknown[]) => unknown).apply(handler, args);
-    if (selected.endpoint.pattern === "serverStream") {
+    const res = (fn as (i: unknown) => unknown)(input);
+    if (selected.endpoint.pattern === "serverStream" || selected.endpoint.kind === "stream") {
       await printStream(res as AsyncIterable<unknown>);
     } else {
       printUnary(await Promise.resolve(res));
     }
   } catch (err) {
     process.stderr.write(toErrorMessage(err) + "\n");
-    process.exitCode = 1;
+    if (params.strictExitCode) process.exitCode = 1;
   }
+}
+
+async function runInteractive(params: {
+  app: unknown;
+  endpoints: CliEndpoint[];
+  publicEndpoints: CliEndpoint[];
+  initialTokens?: string[];
+}): Promise<void> {
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: true
+  });
+
+  process.stdout.write('Agnet interactive mode. Type "help" (or "?") for commands, "exit" to quit.\n');
+
+  try {
+    if (params.initialTokens && params.initialTokens.length > 0) {
+      await dispatchOnce({
+        app: params.app,
+        endpoints: params.endpoints,
+        publicEndpoints: params.publicEndpoints,
+        tokens: params.initialTokens,
+        strictExitCode: false
+      });
+    }
+
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      let line: string;
+      try {
+        line = await rl.question("agnet> ");
+      } catch {
+        break; // stdin closed
+      }
+
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+
+      if (trimmed === "exit" || trimmed === "quit") break;
+      if (trimmed === "help" || trimmed === "?") {
+        process.stdout.write(usage(params.publicEndpoints) + "\n");
+        continue;
+      }
+
+      let tokens = tokenizeCommandLine(trimmed);
+      if (tokens[0] === "agnet") tokens = tokens.slice(1);
+
+      await dispatchOnce({
+        app: params.app,
+        endpoints: params.endpoints,
+        publicEndpoints: params.publicEndpoints,
+        tokens,
+        strictExitCode: false
+      });
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+export async function runCli(argv: string[]): Promise<void> {
+  const entryPath = argv[1];
+  const mockAgentPathCandidate =
+    typeof entryPath === "string" && entryPath.length > 0 ? path.resolve(path.dirname(entryPath), "mock-agent.mjs") : "";
+  const mockAgentPath = existsSync(mockAgentPathCandidate)
+    ? mockAgentPathCandidate
+    : path.resolve(process.cwd(), "bin", "mock-agent.mjs");
+
+  const ctx = createAppContext({ cwd: process.cwd(), env: process.env, mockAgentPath });
+  const app = createApp(ctx);
+  const endpoints = flattenApiSchema(app.getApiSchema());
+  const publicEndpoints = endpoints.filter((e) => !e.internal);
+
+  const rawTokens = argv.slice(2);
+  const interactive = rawTokens.includes("--interactive") || rawTokens.includes("-i");
+  const tokens = rawTokens.filter((t) => t !== "--interactive" && t !== "-i");
+
+  if (interactive) {
+    await runInteractive({ app, endpoints, publicEndpoints, initialTokens: tokens.length > 0 ? tokens : undefined });
+    return;
+  }
+
+  await dispatchOnce({ app, endpoints, publicEndpoints, tokens, strictExitCode: true });
 }
 

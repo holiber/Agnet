@@ -1,6 +1,5 @@
 import process from "node:process";
 
-import { Api } from "../api/api.js";
 import type { ChatMessage } from "../protocol.js";
 import { spawnLocalAgent } from "../local-runtime.js";
 import {
@@ -12,6 +11,7 @@ import {
 } from "../runtime/chat-client.js";
 import { deleteChat, readChat, writeChat } from "../storage/chats.js";
 import { requireNonEmptyString, toErrorMessage } from "../internal/utils.js";
+import { streamOpenAIResponseText } from "../adapters/openai.js";
 import { ProvidersApi, type ProvidersApiContext } from "./providers-api.js";
 
 export interface ChatsApiContext extends ProvidersApiContext {}
@@ -32,9 +32,7 @@ export class ChatsApi {
     this.providers = new ProvidersApi(ctx);
   }
 
-  @Api.endpoint("chats.create")
   async create(
-    @Api.arg({ name: "providerId", type: "string", cli: { flag: "--provider" } })
     providerId?: string
   ): Promise<string> {
     const resolvedProviderId = await this.providers.resolveDefaultProviderId(providerId);
@@ -43,25 +41,60 @@ export class ChatsApi {
     return chatId;
   }
 
-  @Api.endpoint("chats.send", { pattern: "serverStream" })
   async *send(
-    @Api.arg({ name: "chatId", type: "string", required: true, cli: { flag: "--chat", aliases: ["--task", "--session"] } })
     chatId?: string,
-    @Api.arg({ name: "prompt", type: "string", required: true, cli: { flag: "--prompt" } })
     prompt?: string,
-    @Api.arg({ name: "timeoutMs", type: "string", cli: { flag: "--timeout-ms" } })
     timeoutMsArg?: string
   ): AsyncIterable<string> {
     const resolvedChatId = requireNonEmptyString(chatId, "chatId");
     const content = requireNonEmptyString(prompt, "prompt");
-    const requestTimeoutMs = parseTimeoutMsArg(timeoutMsArg);
 
     const chat = await readChat(this.ctx.cwd, resolvedChatId);
     const providerId = chat.providerId ?? "mock-agent";
-    const providerConfig = await this.providers.resolveProviderConfig(providerId);
-    const runtime = await this.providers.resolveCliRuntime(providerId);
-    const effectiveTimeoutMs = requestTimeoutMs ?? providerConfig.agent.timeoutMs ?? GLOBAL_FALLBACK_AI_TIMEOUT_MS;
+    const providerCfg = await this.providers.resolveProviderConfig(providerId);
+    const requestTimeoutMs = parseTimeoutMsArg(timeoutMsArg);
+    const effectiveTimeoutMs = requestTimeoutMs ?? providerCfg.agent.timeoutMs ?? GLOBAL_FALLBACK_AI_TIMEOUT_MS;
 
+    const history = Array.isArray(chat.history) ? (chat.history as ChatMessage[]) : ([] as ChatMessage[]);
+
+    // Tier2: support HTTP runtimes (initially OpenAI Responses API).
+    if (providerCfg.runtime.transport === "http") {
+      const headers = await this.providers.resolveProviderAuthHeaders(providerId);
+      const auth = headers.Authorization ?? headers.authorization;
+      const apiKey = typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice("Bearer ".length).trim() : undefined;
+
+      const ext = (providerCfg.agent.extensions ?? {}) as any;
+      const openaiModel = ext?.openai?.model ?? ext?.model ?? process.env.OPENAI_MODEL ?? "gpt-4o-mini";
+      const systemPrompt = typeof ext?.systemPrompt === "string" ? ext.systemPrompt : undefined;
+
+      let combined = "";
+      for await (const delta of streamOpenAIResponseText({
+        config: {
+          apiKey,
+          model: String(openaiModel),
+          baseUrl: providerCfg.runtime.baseUrl,
+          systemPrompt
+        },
+        history,
+        prompt: content,
+        timeoutMs: effectiveTimeoutMs
+      })) {
+        combined += delta;
+        yield delta;
+      }
+
+      const nextHistory: ChatMessage[] = [
+        ...history,
+        { role: "user", content },
+        { role: "assistant", content: combined }
+      ];
+      await writeChat(this.ctx.cwd, resolvedChatId, { version: 1, chatId: resolvedChatId, providerId, history: nextHistory });
+      if (!combined.endsWith("\n")) yield "\n";
+      return;
+    }
+
+    // Default: local CLI runtime (existing behavior).
+    const runtime = await this.providers.resolveCliRuntime(providerId);
     const conn = spawnLocalAgent({
       command: runtime.command,
       args: Array.isArray(runtime.args) ? runtime.args : [],
@@ -75,7 +108,6 @@ export class ChatsApi {
       await conn.transport.send({ type: "session/start", sessionId: resolvedChatId });
       await waitForType(iter, "session/started");
 
-      const history = Array.isArray(chat.history) ? (chat.history as ChatMessage[]) : ([] as ChatMessage[]);
       const priorUsers = history.filter(
         (m) => m && (m as ChatMessage).role === "user" && typeof (m as ChatMessage).content === "string"
       ) as ChatMessage[];
@@ -132,9 +164,7 @@ export class ChatsApi {
     }
   }
 
-  @Api.endpoint("chats.close")
   async close(
-    @Api.arg({ name: "chatId", type: "string", required: true, cli: { flag: "--chat", aliases: ["--task", "--session"] } })
     chatId?: string
   ): Promise<string> {
     const resolvedChatId = requireNonEmptyString(chatId, "chatId");
