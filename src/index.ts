@@ -19,4 +19,5 @@ export * from "./stdio-transport.js";
 
 export * from "./workbench-lite.js";
 export * from "./workbench-lite-sse.js";
+export * as workbenchLight from "./workbench-light.js";
 
