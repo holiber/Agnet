@@ -332,7 +332,12 @@ export interface RegisteredAgentRef {
   getAuthHeaders: () => Record<string, string>;
 }
 
-export class Agnet {
+/**
+ * Internal registry for agent cards + runtime configs.
+ *
+ * Tier1 public surface is chat-first (`Agnet` in `src/agnet.ts`).
+ */
+export class AgentInterop {
   private readonly byId = new Map<string, RegisteredAgentRef>();
 
   register(input: AgentRegistrationInput, opts: RegisterOptions = {}): RegisteredAgentRef {
