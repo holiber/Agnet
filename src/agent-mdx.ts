@@ -199,6 +199,15 @@ export function parseAgentMdx(raw: string, opts?: { path?: string }): AgentConfi
   if (!name) throw mdxError(opts?.path, "missing required frontmatter field: name");
   if (!version) throw mdxError(opts?.path, "missing required frontmatter field: version");
 
+  let timeoutMs: number | undefined;
+  if (fm.timeoutMs !== undefined) {
+    if (typeof fm.timeoutMs !== "number" || !Number.isFinite(fm.timeoutMs)) {
+      throw mdxError(opts?.path, "frontmatter.timeoutMs must be a finite number");
+    }
+    if (fm.timeoutMs < 1) throw mdxError(opts?.path, "frontmatter.timeoutMs must be >= 1");
+    timeoutMs = fm.timeoutMs;
+  }
+
   const runtimeRaw = fm.runtime;
   if (runtimeRaw === undefined) throw mdxError(opts?.path, "missing required frontmatter field: runtime");
   let runtime: AgentRuntimeConfig;
@@ -325,6 +334,7 @@ export function parseAgentMdx(raw: string, opts?: { path?: string }): AgentConfi
     name,
     version,
     description: desc,
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     skills,
     ...(rules.length > 0 ? { rules } : {}),
     ...(mcp ? { mcp } : {}),

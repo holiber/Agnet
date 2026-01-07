@@ -23,14 +23,16 @@ export class ShortcutsApi {
     @Api.arg({ name: "prompt", type: "string", required: true, cli: { positionalIndex: 0 } })
     prompt: string,
     @Api.arg({ name: "providerId", type: "string", cli: { flag: "--provider" } })
-    providerId?: string
+    providerId?: string,
+    @Api.arg({ name: "timeoutMs", type: "string", cli: { flag: "--timeout-ms" } })
+    timeoutMs?: string
   ): Promise<string> {
     const content = requireNonEmptyString(prompt, "prompt");
     const chatId = await this.chats.create(providerId);
 
     try {
       let out = "";
-      for await (const delta of this.chats.send(chatId, content)) out += typeof delta === "string" ? delta : "";
+      for await (const delta of this.chats.send(chatId, content, timeoutMs)) out += typeof delta === "string" ? delta : "";
       return out;
     } finally {
       // One-shot by default: don't clutter disk with short-lived chats.
@@ -47,14 +49,16 @@ export class ShortcutsApi {
     @Api.arg({ name: "prompt", type: "string", required: true, cli: { positionalIndex: 0 } })
     prompt: string,
     @Api.arg({ name: "providerId", type: "string", cli: { flag: "--provider" } })
-    providerId?: string
+    providerId?: string,
+    @Api.arg({ name: "timeoutMs", type: "string", cli: { flag: "--timeout-ms" } })
+    timeoutMs?: string
   ): Promise<{ text: string; chatId: string; providerId: string; history: ChatMessage[] }> {
     const content = requireNonEmptyString(prompt, "prompt");
     const chatId = await this.chats.create(providerId);
 
     try {
       let out = "";
-      for await (const delta of this.chats.send(chatId, content)) out += typeof delta === "string" ? delta : "";
+      for await (const delta of this.chats.send(chatId, content, timeoutMs)) out += typeof delta === "string" ? delta : "";
       const persisted = await readChat(this.ctx.cwd, chatId);
       return {
         text: stripTrailingNewlineOnce(out),

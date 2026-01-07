@@ -71,6 +71,13 @@ export class ProvidersApi {
   }
 
   /**
+   * Internal helper for other APIs (e.g. chats) to read the full provider config.
+   */
+  async resolveProviderConfig(providerId: string): Promise<AgentConfig> {
+    return this.resolveProvider(providerId);
+  }
+
+  /**
    * Deterministic default provider selection:
    * - if a provider is explicitly marked default (via `agent.extensions.default` or `agent.extensions.isDefault`) use it
    * - otherwise, use the last registered provider (by registry order)
