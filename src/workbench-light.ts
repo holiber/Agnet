@@ -162,9 +162,9 @@ type ModuleRuntime = {
 const WB_SCHEMA = Symbol("workbench-light.schema");
 const WB_MODULE = Symbol("workbench-light.module");
 
-export type Module<D extends ApiDef> = {
+export type Module<C extends WorkbenchContext, D extends ApiDef> = {
   getApiSchema: () => ApiSchemaNode;
-  activate: (ctx?: WorkbenchContext) => ActivatedFromDef<D>;
+  activate: (ctx?: C) => ActivatedFromDef<D>;
   [WB_MODULE]: true;
 };
 
@@ -173,7 +173,7 @@ function isOp(x: unknown): x is AnyOp {
   return typeof y === "function" && !!y.kind && !!y.input && (!!y.output || !!y.chunk);
 }
 
-function isModule(x: unknown): x is Module<any> {
+function isModule(x: unknown): x is Module<any, any> {
   const y = x as any;
   return !!y && typeof y === "object" && typeof y.getApiSchema === "function" && typeof y.activate === "function";
 }
@@ -194,7 +194,7 @@ function buildSchema(node: any): ApiSchemaNode {
 }
 
 type ApiDef = {
-  [key: string]: AnyOp | ApiDef | Module<any>;
+  [key: string]: AnyOp | ApiDef | Module<any, any>;
 };
 
 type ApiFromDef<D> =
@@ -202,7 +202,7 @@ type ApiFromDef<D> =
     ? (input: z.infer<I>) => Promise<z.infer<O>>
     : D extends StreamOp<infer I, infer C>
       ? (input: z.infer<I>) => AsyncIterable<z.infer<C>>
-      : D extends Module<infer MD>
+      : D extends Module<any, infer MD>
         ? ActivatedFromDef<MD>
         : D extends Record<string, any>
           ? { [K in keyof D]: ApiFromDef<D[K]> }
@@ -286,28 +286,28 @@ function createSchemaCtx(): WorkbenchContext {
   };
 }
 
-export function module<const D extends ApiDef>(def: D): Module<D>;
-export function module<const D extends ApiDef>(factory: ModuleFactory<D>): Module<D>;
-export function module<const D extends ApiDef>(defOrFactory: D | ModuleFactory<D>): Module<D> {
+export function module<const D extends ApiDef>(def: D): Module<WorkbenchContext, D>;
+export function module<C extends WorkbenchContext, const D extends ApiDef>(factory: (ctx: C) => { api: D } | D): Module<C, D>;
+export function module<C extends WorkbenchContext, const D extends ApiDef>(defOrFactory: D | ((ctx: C) => { api: D } | D)): Module<C, D> {
   const activatedByCtx = new WeakMap<object, any>();
 
   const getDefForSchema = (): D => {
     if (typeof defOrFactory !== "function") return defOrFactory;
     const schemaCtx = createSchemaCtx();
-    const out = (defOrFactory as ModuleFactory<D>)(schemaCtx);
+    const out = (defOrFactory as (ctx: C) => { api: D } | D)(schemaCtx as unknown as C);
     return (out as any).api ? (out as any).api : (out as any);
   };
 
   const schema = buildSchema(getDefForSchema());
 
-  const mod: Module<D> = {
+  const mod: Module<C, D> = {
     [WB_MODULE]: true as const,
     getApiSchema() {
       return schema;
     },
     activate(ctx?: WorkbenchContext) {
       const ownsCtx = !ctx;
-      const sharedCtx = ctx ?? createWorkbenchContext();
+      const sharedCtx = (ctx ?? createWorkbenchContext()) as unknown as C;
       const key = sharedCtx as unknown as object;
 
       const cached = activatedByCtx.get(key);
@@ -315,7 +315,7 @@ export function module<const D extends ApiDef>(defOrFactory: D | ModuleFactory<D
 
       let def: D;
       if (typeof defOrFactory === "function") {
-        const out = (defOrFactory as ModuleFactory<D>)(sharedCtx) as any;
+        const out = (defOrFactory as (ctx: C) => { api: D } | D)(sharedCtx) as any;
         def = (out?.api ?? out) as D;
       } else {
         def = defOrFactory;
