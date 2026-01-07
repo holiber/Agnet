@@ -1,20 +1,29 @@
-import { readFile, writeFile } from "node:fs/promises";
 import process from "node:process";
+import { readFile, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 
-import type { AgentRuntimeConfig, RegisteredAgentRef } from "./agent-interop.js";
-import { AgentInterop } from "./agent-interop.js";
 import type { ChatMessage } from "./protocol.js";
 import { spawnLocalAgent } from "./local-runtime.js";
-import { randomId, sendAndWaitComplete, waitForType } from "./runtime/task-client.js";
-import { readTask, writeTask } from "./storage/tasks.js";
+import { randomId, sendAndWaitComplete, waitForType } from "./runtime/chat-client.js";
+import { readChat, writeChat } from "./storage/chats.js";
+import { readProvidersRegistrySync, writeProvidersRegistrySync } from "./storage/providers-registry.js";
+import type {
+  AgentConfig,
+  AgentRegistrationInput,
+  AgentRuntimeConfig,
+  RegisteredProviderRef,
+  RegisterOptions
+} from "./providers.js";
+import { registerProvider, validateAgentConfig } from "./providers.js";
+import { parseAgentMdx } from "./agent-mdx.js";
 
-// Re-export Tier1 agent config helpers/types.
-export * from "./agent-interop.js";
+// Re-export Tier1 provider config helpers/types.
+export * from "./providers.js";
 
-export interface ProviderRef extends RegisteredAgentRef {}
+export type ProviderRef = RegisteredProviderRef;
 
 export interface ProvidersRegistry {
-  register: AgentInterop["register"];
+  register: (input: AgentRegistrationInput, opts?: RegisterOptions) => ProviderRef;
   get: (selector: { type: string } | { id: string } | string) => ProviderRef | undefined;
   list: () => ProviderRef[];
 }
@@ -40,7 +49,7 @@ type PersistedChatV1 = {
   version: 1;
   providerId: string;
   agentId: string;
-  taskId: string;
+  chatId: string;
   history: ChatMessage[];
 };
 
@@ -58,7 +67,7 @@ function isNonEmptyString(x: unknown): x is string {
 async function runTaskSend(params: {
   cwd: string;
   provider: ProviderRef;
-  taskId: string;
+  chatId: string;
   prompt: string;
 }): Promise<{ combined: string; history: ChatMessage[] }> {
   const runtime = params.provider.runtime;
@@ -76,23 +85,23 @@ async function runTaskSend(params: {
   try {
     const iter = conn.transport[Symbol.asyncIterator]();
     await waitForType(iter, "ready");
-    await conn.transport.send({ type: "session/start", sessionId: params.taskId });
+    await conn.transport.send({ type: "session/start", sessionId: params.chatId });
     await waitForType(iter, "session/started");
 
     // Replay prior user prompts to rebuild state.
-    const task = await readTask(params.cwd, params.taskId);
-    const history = Array.isArray(task.history) ? (task.history as ChatMessage[]) : ([] as ChatMessage[]);
+    const chat = await readChat(params.cwd, params.chatId);
+    const history = Array.isArray(chat.history) ? (chat.history as ChatMessage[]) : ([] as ChatMessage[]);
     const priorUsers = history.filter(
       (m) => m && (m as ChatMessage).role === "user" && typeof (m as ChatMessage).content === "string"
     ) as ChatMessage[];
     for (const m of priorUsers) {
-      await sendAndWaitComplete({ iter, transport: conn.transport, sessionId: params.taskId, content: m.content });
+      await sendAndWaitComplete({ iter, transport: conn.transport, sessionId: params.chatId, content: m.content });
     }
 
     const { msg, combined } = await sendAndWaitComplete({
       iter,
       transport: conn.transport,
-      sessionId: params.taskId,
+      sessionId: params.chatId,
       content: params.prompt
     });
 
@@ -108,12 +117,12 @@ class TaskBackedChat implements Chat {
     private readonly opts: {
       cwd: string;
       provider: ProviderRef;
-      taskId: string;
+      chatId: string;
     }
   ) {}
 
   get id(): string {
-    return this.opts.taskId;
+    return this.opts.chatId;
   }
 
   get providerId(): string {
@@ -130,12 +139,12 @@ class TaskBackedChat implements Chat {
     const { combined, history } = await runTaskSend({
       cwd: this.opts.cwd,
       provider: this.opts.provider,
-      taskId: this.opts.taskId,
+      chatId: this.opts.chatId,
       prompt
     });
 
-    const existing = await readTask(this.opts.cwd, this.opts.taskId);
-    await writeTask(this.opts.cwd, this.opts.taskId, {
+    const existing = await readChat(this.opts.cwd, this.opts.chatId);
+    await writeChat(this.opts.cwd, this.opts.chatId, {
       ...existing,
       history
     });
@@ -145,24 +154,37 @@ class TaskBackedChat implements Chat {
   }
 
   async saveToFile(path: string): Promise<void> {
-    const task = await readTask(this.opts.cwd, this.opts.taskId);
+    const chat = await readChat(this.opts.cwd, this.opts.chatId);
     const payload: PersistedChatV1 = {
       version: 1,
       providerId: this.providerId,
       agentId: this.agentId,
-      taskId: this.opts.taskId,
-      history: Array.isArray(task.history) ? task.history : []
+      chatId: this.opts.chatId,
+      history: Array.isArray(chat.history) ? chat.history : []
     };
     await writeFile(path, JSON.stringify(payload, null, 2) + "\n", "utf-8");
   }
 }
 
 export class Agnet {
-  private readonly interop = new AgentInterop();
   private readonly cwd: string;
+  private readonly env: NodeJS.ProcessEnv;
+  private readonly providersById = new Map<string, ProviderRef>();
 
-  constructor(opts?: { cwd?: string }) {
+  constructor(opts?: { cwd?: string; env?: NodeJS.ProcessEnv }) {
     this.cwd = opts?.cwd ?? process.cwd();
+    this.env = opts?.env ?? process.env;
+
+    // Load persisted providers eagerly (sync) to keep providers.get/list synchronous.
+    const registry = readProvidersRegistrySync(this.cwd);
+    for (const cfg of registry.providers) {
+      try {
+        const ref = registerProvider(cfg, { env: this.env });
+        this.providersById.set(ref.id, ref);
+      } catch {
+        // Ignore invalid entries.
+      }
+    }
   }
 
   /**
@@ -171,7 +193,30 @@ export class Agnet {
    * Providers are the SSOT-backed configuration layer for chat sources.
    */
   readonly providers: ProvidersRegistry = {
-    register: (input, opts) => this.interop.register(input, opts),
+    register: (input, opts) => {
+      const ref = registerProvider(input, { ...opts, env: opts?.env ?? this.env });
+      this.providersById.set(ref.id, ref);
+
+      // Persist only when a full AgentConfig is provided (or loadable from file/json).
+      try {
+        let cfg: AgentConfig;
+        if (typeof input === "string") {
+          const raw = readFileSync(input, "utf-8");
+          const parsed = input.toLowerCase().endsWith(".agent.mdx") ? parseAgentMdx(raw, { path: input }) : JSON.parse(raw);
+          cfg = validateAgentConfig(parsed);
+        } else {
+          cfg = validateAgentConfig(input as unknown);
+        }
+        const registry = readProvidersRegistrySync(this.cwd);
+        const next = registry.providers.filter((p) => p?.agent?.id !== cfg.agent.id);
+        next.push(cfg);
+        writeProvidersRegistrySync(this.cwd, next);
+      } catch {
+        // No persistence for adapter-only registration.
+      }
+
+      return ref;
+    },
     get: (selector) => {
       const id =
         typeof selector === "string"
@@ -181,17 +226,10 @@ export class Agnet {
             : isNonEmptyString((selector as { id?: unknown }).id)
               ? (selector as { id: string }).id
               : "";
-      return id ? (this.interop.get(id) as ProviderRef | undefined) : undefined;
+      return id ? this.providersById.get(id) : undefined;
     },
-    list: () => this.interop.list() as ProviderRef[]
+    list: () => [...this.providersById.values()]
   };
-
-  /**
-   * @deprecated Use `an.providers` (chat-first Tier1 API).
-   */
-  get agents(): ProvidersRegistry {
-    return this.providers;
-  }
 
   readonly chats = {
     /**
@@ -204,9 +242,9 @@ export class Agnet {
 
     create: async (opts?: { providerId?: string }): Promise<Chat> => {
       const provider = this.resolveDefaultProvider(opts?.providerId);
-      const taskId = randomId("chat");
-      await writeTask(this.cwd, taskId, { version: 1, taskId, agentId: provider.id, skill: "chat", history: [] });
-      return new TaskBackedChat({ cwd: this.cwd, provider, taskId });
+      const chatId = randomId("chat");
+      await writeChat(this.cwd, chatId, { version: 1, chatId, providerId: provider.id, history: [] });
+      return new TaskBackedChat({ cwd: this.cwd, provider, chatId });
     },
 
     loadFromFile: async (path: string): Promise<Chat> => {
@@ -222,20 +260,19 @@ export class Agnet {
       const obj = parsed as Partial<PersistedChatV1>;
       if (obj.version !== 1) throw new Error(`Invalid chat file at "${path}": unsupported version`);
       if (!isNonEmptyString(obj.providerId)) throw new Error(`Invalid chat file at "${path}": missing providerId`);
-      if (!isNonEmptyString(obj.taskId)) throw new Error(`Invalid chat file at "${path}": missing taskId`);
+      if (!isNonEmptyString(obj.chatId)) throw new Error(`Invalid chat file at "${path}": missing chatId`);
 
       const provider = this.providers.get(obj.providerId);
       if (!provider) throw new Error(`Unknown provider "${obj.providerId}" while loading chat`);
 
       const history = Array.isArray(obj.history) ? (obj.history as ChatMessage[]) : [];
-      await writeTask(this.cwd, obj.taskId, {
+      await writeChat(this.cwd, obj.chatId, {
         version: 1,
-        taskId: obj.taskId,
-        agentId: provider.id,
-        skill: "chat",
+        chatId: obj.chatId,
+        providerId: provider.id,
         history
       });
-      return new TaskBackedChat({ cwd: this.cwd, provider, taskId: obj.taskId });
+      return new TaskBackedChat({ cwd: this.cwd, provider, chatId: obj.chatId });
     }
   };
 
