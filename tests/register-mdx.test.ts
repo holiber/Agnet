@@ -16,6 +16,7 @@ describe("Agnet.providers.register (.agent.mdx)", () => {
 id: mdx-a
 name: MDX A
 version: 0.1.0
+timeoutMs: 60001
 runtime:
   transport: http
   baseUrl: https://example.com
@@ -41,6 +42,7 @@ Talk.
     const ref = ai.providers.register(mdxPath);
     expect(ref.id).toBe("mdx-a");
     expect(ref.runtime?.transport).toBe("http");
+    expect(ref.card.timeoutMs).toBe(60001);
     expect(ai.providers.list().map((a) => a.id)).toContain("mdx-a");
     expect((ai.providers.get("mdx-a")?.card.extensions as any)?.systemPrompt).toContain("System prompt A.");
   });

@@ -34,6 +34,11 @@ export async function* streamOpenAIResponseText(params: {
   config: OpenAIAdapterConfig;
   history: ChatMessage[];
   prompt: string;
+  /**
+   * Timeout (ms) for the OpenAI Responses API request.
+   * If omitted, the caller should apply its own defaulting/precedence rules.
+   */
+  timeoutMs?: number;
 }): AsyncIterable<string> {
   const apiKey = params.config.apiKey;
   const model = params.config.model;
@@ -51,10 +56,13 @@ export async function* streamOpenAIResponseText(params: {
     prompt: params.prompt
   });
 
-  const stream = await client.responses.stream({
-    model,
-    input
-  });
+  const stream = await client.responses.stream(
+    {
+      model,
+      input
+    },
+    params.timeoutMs !== undefined ? { timeout: params.timeoutMs } : undefined
+  );
 
   for await (const event of stream) {
     if (event.type === "response.output_text.delta") {

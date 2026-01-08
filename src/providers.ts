@@ -36,6 +36,11 @@ export interface AgentCard {
   name: string;
   version: string;
   description?: string;
+  /**
+   * Default timeout (ms) to wait for agent/AI responses when making a request.
+   * Request-level overrides take precedence.
+   */
+  timeoutMs?: number;
   skills: AgentSkill[];
   rules?: AgentRule[];
   /**
@@ -154,6 +159,14 @@ export function validateAgentCard(value: unknown, path = "agent"): AgentCard {
   const name = requireNonEmptyString(obj.name, `${path}.name`);
   const version = requireNonEmptyString(obj.version, `${path}.version`);
   const description = optionalString(obj.description, `${path}.description`);
+  let timeoutMs: number | undefined;
+  if (obj.timeoutMs !== undefined) {
+    if (typeof obj.timeoutMs !== "number" || !Number.isFinite(obj.timeoutMs)) {
+      throw pathError(`${path}.timeoutMs`, "expected finite number");
+    }
+    if (obj.timeoutMs < 1) throw pathError(`${path}.timeoutMs`, "expected number >= 1");
+    timeoutMs = obj.timeoutMs;
+  }
 
   const skillsRaw = requireArray(obj.skills, `${path}.skills`);
   if (skillsRaw.length === 0) throw pathError(`${path}.skills`, "expected non-empty array");
@@ -205,7 +218,7 @@ export function validateAgentCard(value: unknown, path = "agent"): AgentCard {
     extensions = obj.extensions as JsonObject;
   }
 
-  return { id, name, version, description, skills, rules, mcp, auth, extensions };
+  return { id, name, version, description, timeoutMs, skills, rules, mcp, auth, extensions };
 }
 
 export function validateAgentRuntimeConfig(value: unknown, path = "runtime"): AgentRuntimeConfig {

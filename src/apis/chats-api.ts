@@ -2,13 +2,28 @@ import process from "node:process";
 
 import type { ChatMessage } from "../protocol.js";
 import { spawnLocalAgent } from "../local-runtime.js";
-import { nextMessage, randomId, sendAndWaitComplete, waitForType } from "../runtime/chat-client.js";
+import {
+  GLOBAL_FALLBACK_AI_TIMEOUT_MS,
+  nextMessage,
+  randomId,
+  sendAndWaitComplete,
+  waitForType
+} from "../runtime/chat-client.js";
 import { deleteChat, readChat, writeChat } from "../storage/chats.js";
 import { requireNonEmptyString, toErrorMessage } from "../internal/utils.js";
 import { streamOpenAIResponseText } from "../adapters/openai.js";
 import { ProvidersApi, type ProvidersApiContext } from "./providers-api.js";
 
 export interface ChatsApiContext extends ProvidersApiContext {}
+
+function parseTimeoutMsArg(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const s = String(raw).trim();
+  if (s.length === 0) return undefined;
+  const n = Number(s);
+  if (!Number.isFinite(n) || n < 1) throw new Error(`Invalid timeoutMs: expected number >= 1`);
+  return Math.floor(n);
+}
 
 export class ChatsApi {
   private readonly providers: ProvidersApi;
@@ -28,7 +43,8 @@ export class ChatsApi {
 
   async *send(
     chatId?: string,
-    prompt?: string
+    prompt?: string,
+    timeoutMsArg?: string
   ): AsyncIterable<string> {
     const resolvedChatId = requireNonEmptyString(chatId, "chatId");
     const content = requireNonEmptyString(prompt, "prompt");
@@ -36,6 +52,8 @@ export class ChatsApi {
     const chat = await readChat(this.ctx.cwd, resolvedChatId);
     const providerId = chat.providerId ?? "mock-agent";
     const providerCfg = await this.providers.resolveProviderConfig(providerId);
+    const requestTimeoutMs = parseTimeoutMsArg(timeoutMsArg);
+    const effectiveTimeoutMs = requestTimeoutMs ?? providerCfg.agent.timeoutMs ?? GLOBAL_FALLBACK_AI_TIMEOUT_MS;
 
     const history = Array.isArray(chat.history) ? (chat.history as ChatMessage[]) : ([] as ChatMessage[]);
 
@@ -58,7 +76,8 @@ export class ChatsApi {
           systemPrompt
         },
         history,
-        prompt: content
+        prompt: content,
+        timeoutMs: effectiveTimeoutMs
       })) {
         combined += delta;
         yield delta;
@@ -94,7 +113,13 @@ export class ChatsApi {
       ) as ChatMessage[];
 
       for (const m of priorUsers) {
-        await sendAndWaitComplete({ iter, transport: conn.transport, sessionId: resolvedChatId, content: m.content });
+        await sendAndWaitComplete({
+          iter,
+          transport: conn.transport,
+          sessionId: resolvedChatId,
+          content: m.content,
+          timeoutMs: effectiveTimeoutMs
+        });
       }
 
       await conn.transport.send({ type: "session/send", sessionId: resolvedChatId, content });
@@ -102,7 +127,7 @@ export class ChatsApi {
       const deltasByIndex = new Map<number, string>();
       // eslint-disable-next-line no-constant-condition
       while (true) {
-        const msg = await nextMessage(iter, `stream/complete for chat "${resolvedChatId}"`);
+        const msg = await nextMessage(iter, `stream/complete for chat "${resolvedChatId}"`, effectiveTimeoutMs);
 
         if (!msg || typeof msg !== "object") continue;
         const type = (msg as { type?: unknown }).type;

@@ -19,14 +19,15 @@ export class ShortcutsApi {
 
   async ask(
     prompt: string,
-    providerId?: string
+    providerId?: string,
+    timeoutMs?: string
   ): Promise<string> {
     const content = requireNonEmptyString(prompt, "prompt");
     const chatId = await this.chats.create(providerId);
 
     try {
       let out = "";
-      for await (const delta of this.chats.send(chatId, content)) out += typeof delta === "string" ? delta : "";
+      for await (const delta of this.chats.send(chatId, content, timeoutMs)) out += typeof delta === "string" ? delta : "";
       return out;
     } finally {
       // One-shot by default: don't clutter disk with short-lived chats.
@@ -40,14 +41,15 @@ export class ShortcutsApi {
 
   async prompt(
     prompt: string,
-    providerId?: string
+    providerId?: string,
+    timeoutMs?: string
   ): Promise<{ text: string; chatId: string; providerId: string; history: ChatMessage[] }> {
     const content = requireNonEmptyString(prompt, "prompt");
     const chatId = await this.chats.create(providerId);
 
     try {
       let out = "";
-      for await (const delta of this.chats.send(chatId, content)) out += typeof delta === "string" ? delta : "";
+      for await (const delta of this.chats.send(chatId, content, timeoutMs)) out += typeof delta === "string" ? delta : "";
       const persisted = await readChat(this.ctx.cwd, chatId);
       return {
         text: stripTrailingNewlineOnce(out),

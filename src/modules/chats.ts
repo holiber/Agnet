@@ -44,10 +44,10 @@ export const chats = module((ctx: ChatsModuleContext) => {
       ),
 
       send: stream(
-        z.object({ chatId: z.string(), prompt: z.string() }),
+        z.object({ chatId: z.string(), prompt: z.string(), timeoutMs: z.string().optional() }),
         z.string(),
-        async function* ({ chatId, prompt }) {
-          yield* impl.send(chatId, prompt);
+        async function* ({ chatId, prompt, timeoutMs }) {
+          yield* impl.send(chatId, prompt, timeoutMs);
         },
         {
           transport: "serverStream",
@@ -65,6 +65,12 @@ export const chats = module((ctx: ChatsModuleContext) => {
               type: "string",
               required: true,
               cli: { flag: "--prompt" }
+            },
+            {
+              name: "timeoutMs",
+              type: "string",
+              required: false,
+              cli: { flag: "--timeout-ms" }
             }
           ]
         }

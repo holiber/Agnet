@@ -8,6 +8,7 @@ describe(".agent.mdx parsing (Tier1)", () => {
 id: codegen
 name: CodeGen Agent
 version: 0.1.0
+timeoutMs: 12345
 
 runtime:
   transport: cli
@@ -46,6 +47,7 @@ Generate TypeScript code following project conventions.
     expect(config.agent.id).toBe("codegen");
     expect(config.agent.name).toBe("CodeGen Agent");
     expect(config.agent.version).toBe("0.1.0");
+    expect(config.agent.timeoutMs).toBe(12345);
     expect(config.runtime.transport).toBe("cli");
 
     expect(config.agent.description).toContain("Human-readable **markdown**");

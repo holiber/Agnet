@@ -4,7 +4,12 @@ import { readFileSync } from "node:fs";
 
 import type { ChatMessage } from "./protocol.js";
 import { spawnLocalAgent } from "./local-runtime.js";
-import { randomId, sendAndWaitComplete, waitForType } from "./runtime/chat-client.js";
+import {
+  GLOBAL_FALLBACK_AI_TIMEOUT_MS,
+  randomId,
+  sendAndWaitComplete,
+  waitForType
+} from "./runtime/chat-client.js";
 import { readChat, writeChat } from "./storage/chats.js";
 import { readProvidersRegistrySync, writeProvidersRegistrySync } from "./storage/providers-registry.js";
 import { isMarkedDefaultAgentCard, stripTrailingNewlineOnce } from "./internal/utils.js";
@@ -43,7 +48,7 @@ export interface Chat {
   readonly id: string;
   readonly providerId: string;
   readonly agentId: string;
-  send: (prompt: string) => Promise<string>;
+  send: (prompt: string, opts?: { timeoutMs?: number }) => Promise<string>;
   saveToFile: (path: string) => Promise<void>;
 }
 
@@ -58,6 +63,11 @@ export type TAgentRequest =
   | {
       providerId?: string;
       prompt: string;
+      /**
+       * Optional request-level override for waiting on the agent/AI response (ms).
+       * If omitted, falls back to agent.card.timeoutMs, then the global default.
+       */
+      timeoutMs?: number;
     };
 
 export type AgentResult = {
@@ -110,7 +120,7 @@ function isNonEmptyString(x: unknown): x is string {
   return typeof x === "string" && x.trim().length > 0;
 }
 
-function coerceAgentRequest(input: TAgentRequest): { providerId?: string; prompt: string } {
+function coerceAgentRequest(input: TAgentRequest): { providerId?: string; prompt: string; timeoutMs?: number } {
   if (typeof input === "string") {
     if (!isNonEmptyString(input)) throw new Error("Request prompt must be a non-empty string");
     return { prompt: input };
@@ -120,7 +130,15 @@ function coerceAgentRequest(input: TAgentRequest): { providerId?: string; prompt
   if (!isNonEmptyString(prompt)) throw new Error("Invalid request.prompt: expected non-empty string");
   const providerIdRaw = (input as { providerId?: unknown }).providerId;
   const providerId = providerIdRaw === undefined ? undefined : isNonEmptyString(providerIdRaw) ? providerIdRaw : undefined;
-  return { prompt, providerId };
+  const timeoutRaw = (input as { timeoutMs?: unknown }).timeoutMs;
+  let timeoutMs: number | undefined;
+  if (timeoutRaw !== undefined) {
+    if (typeof timeoutRaw !== "number" || !Number.isFinite(timeoutRaw) || timeoutRaw < 1) {
+      throw new Error("Invalid request.timeoutMs: expected number >= 1");
+    }
+    timeoutMs = Math.floor(timeoutRaw);
+  }
+  return { prompt, providerId, timeoutMs };
 }
 
 async function runTaskSend(params: {
@@ -128,6 +146,7 @@ async function runTaskSend(params: {
   provider: ProviderRef;
   chatId: string;
   prompt: string;
+  timeoutMs?: number;
 }): Promise<{ combined: string; history: ChatMessage[] }> {
   const runtime = params.provider.runtime;
   if (!runtime) throw new Error(`Provider "${params.provider.id}" has no runtime configured`);
@@ -179,6 +198,8 @@ async function runTaskSend(params: {
     await conn.transport.send({ type: "session/start", sessionId: params.chatId });
     await waitForType(iter, "session/started");
 
+    const effectiveTimeoutMs = params.timeoutMs ?? params.provider.card.timeoutMs ?? GLOBAL_FALLBACK_AI_TIMEOUT_MS;
+
     // Replay prior user prompts to rebuild state.
     const chat = await readChat(params.cwd, params.chatId);
     const history = Array.isArray(chat.history) ? (chat.history as ChatMessage[]) : ([] as ChatMessage[]);
@@ -186,14 +207,21 @@ async function runTaskSend(params: {
       (m) => m && (m as ChatMessage).role === "user" && typeof (m as ChatMessage).content === "string"
     ) as ChatMessage[];
     for (const m of priorUsers) {
-      await sendAndWaitComplete({ iter, transport: conn.transport, sessionId: params.chatId, content: m.content });
+      await sendAndWaitComplete({
+        iter,
+        transport: conn.transport,
+        sessionId: params.chatId,
+        content: m.content,
+        timeoutMs: effectiveTimeoutMs
+      });
     }
 
     const { msg, combined } = await sendAndWaitComplete({
       iter,
       transport: conn.transport,
       sessionId: params.chatId,
-      content: params.prompt
+      content: params.prompt,
+      timeoutMs: effectiveTimeoutMs
     });
 
     const completeHistory = Array.isArray(msg.history) ? (msg.history as ChatMessage[]) : history;
@@ -224,14 +252,15 @@ class TaskBackedChat implements Chat {
     return this.opts.provider.id;
   }
 
-  async send(prompt: string): Promise<string> {
+  async send(prompt: string, opts?: { timeoutMs?: number }): Promise<string> {
     if (!isNonEmptyString(prompt)) throw new Error("Chat.send(prompt) requires a non-empty string");
 
     const { combined, history } = await runTaskSend({
       cwd: this.opts.cwd,
       provider: this.opts.provider,
       chatId: this.opts.chatId,
-      prompt
+      prompt,
+      timeoutMs: opts?.timeoutMs
     });
 
     const existing = await readChat(this.opts.cwd, this.opts.chatId);
@@ -264,12 +293,12 @@ class TaskBackedChatExecution implements ChatExecution {
   private readonly cwd: string;
   private readonly responsePromise: Promise<string>;
 
-  constructor(opts: { cwd: string; provider: ProviderRef; chatId: string; prompt: string }) {
+  constructor(opts: { cwd: string; provider: ProviderRef; chatId: string; prompt: string; timeoutMs?: number }) {
     this.cwd = opts.cwd;
     this.provider = opts.provider;
     this.chatId = opts.chatId;
     this.chat = new TaskBackedChat({ cwd: opts.cwd, provider: opts.provider, chatId: opts.chatId });
-    this.responsePromise = this.chat.send(opts.prompt);
+    this.responsePromise = this.chat.send(opts.prompt, { timeoutMs: opts.timeoutMs });
   }
 
   async response(): Promise<string> {
@@ -403,11 +432,11 @@ export class Agnet {
      * Core primitive: create a chat and execute a request through a provider.
      */
     create: async (request: TAgentRequest): Promise<ChatExecution> => {
-      const { providerId, prompt } = coerceAgentRequest(request);
+      const { providerId, prompt, timeoutMs } = coerceAgentRequest(request);
       const provider = this.resolveDefaultProvider(providerId);
       const chatId = randomId("chat");
       await writeChat(this.cwd, chatId, { version: 1, chatId, providerId: provider.id, history: [] });
-      return new TaskBackedChatExecution({ cwd: this.cwd, provider, chatId, prompt });
+      return new TaskBackedChatExecution({ cwd: this.cwd, provider, chatId, prompt, timeoutMs });
     },
 
     loadFromFile: async (path: string): Promise<Chat> => {
