@@ -3,6 +3,7 @@ import path from "node:path";
 import process from "node:process";
 
 import { createApp, createAppContext } from "../app.js";
+import { runTui } from "./tui.js";
 import { flattenApiSchema } from "../internal/api-schema.js";
 import { toErrorMessage } from "../internal/utils.js";
 
@@ -16,6 +17,7 @@ function usage(endpoints: CliEndpoint[]): string {
   const lines: string[] = [];
   lines.push("Agnet CLI", "");
   lines.push("Usage:");
+  lines.push("  agnet tui [--mode <simple|advanced>] [--provider <providerId>] [--chat <chatId>]");
   for (const ep of endpoints) {
     const path = ["agnet", ...endpointPathTokens(ep.id)].join(" ");
     const args = ep.args
@@ -32,6 +34,20 @@ function usage(endpoints: CliEndpoint[]): string {
   }
   lines.push("", 'Notes:', '  - Use "--help" for this message.');
   return lines.join("\n");
+}
+
+function tuiUsage(): string {
+  return [
+    "Agnet TUI",
+    "",
+    "Usage:",
+    "  agnet tui [--mode <simple|advanced>] [--provider <providerId>] [--chat <chatId>]",
+    "",
+    "Notes:",
+    "  - Advanced mode is default.",
+    "  - TUI requires an interactive TTY.",
+    ""
+  ].join("\n");
 }
 
 type ParsedFlags = Record<string, string | boolean | string[]>;
@@ -270,6 +286,57 @@ export async function runCli(argv: string[]): Promise<void> {
   const endpoints = flattenApiSchema(app.getApiSchema());
   const publicEndpoints = endpoints.filter((e) => !e.internal);
   const tokens = argv.slice(2);
+
+  if (tokens[0] === "tui") {
+    const tail = tokens.slice(1);
+    if (tail.includes("--help") || tail.includes("-h")) {
+      process.stdout.write(tuiUsage());
+      return;
+    }
+
+    try {
+      const { flags } = parseCliFlags(tail);
+      for (const k of Object.keys(flags)) {
+        if (k !== "mode" && k !== "provider" && k !== "chat") {
+          throw new Error(`Unknown flag for tui: --${k}`);
+        }
+      }
+      const modeRaw = flags.mode;
+      const mode =
+        modeRaw === undefined
+          ? undefined
+          : modeRaw === true
+            ? (() => {
+                throw new Error("Missing value for --mode");
+              })()
+            : coerceString(modeRaw, "mode");
+      const providerIdRaw = flags.provider;
+      const providerId =
+        providerIdRaw === undefined
+          ? undefined
+          : providerIdRaw === true
+            ? (() => {
+                throw new Error("Missing value for --provider");
+              })()
+            : coerceString(providerIdRaw, "provider");
+      const chatIdRaw = flags.chat;
+      const chatId =
+        chatIdRaw === undefined
+          ? undefined
+          : chatIdRaw === true
+            ? (() => {
+                throw new Error("Missing value for --chat");
+              })()
+            : coerceString(chatIdRaw, "chat");
+
+      await runTui(ctx, { mode: mode as any, providerId, chatId });
+      return;
+    } catch (err) {
+      process.stderr.write(toErrorMessage(err) + "\n");
+      process.exitCode = 1;
+      return;
+    }
+  }
 
   if (tokens.length === 0 || tokens.includes("--help") || tokens.includes("-h")) {
     process.stdout.write(usage(publicEndpoints) + "\n");
