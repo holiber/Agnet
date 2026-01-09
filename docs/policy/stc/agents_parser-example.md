@@ -1,117 +1,73 @@
 # Example of a parser for *.agent.md files
+
+TODO: simplify and add tests
 '''ts
 
 /**
- * Agent .agent.md parser + validator (proposal)
+ * Agent .agent.md parser + validator (simplified)
  *
- * Requirements implemented:
- * - YAML frontmatter is optional, keys are case-insensitive.
- * - Only these headings are allowed as metadata sources (case-insensitive):
- *   - `# <Title>` -> title fallback
- *   - first paragraph after first `#` -> description fallback
- *   - `# Avatar` -> avatar fallback (first image under that section)
- *   - `## System` -> system fallback
- *   - `## Rules` -> rules fallback
+ * Changes per request:
+ * - Added helper: getSectionAfterHeading()
+ * - Tools:
+ *   - We DO NOT parse JS in `## Tools` (too complex).
+ *   - We only extract the JS code fence text and return it as `tools.code`.
+ *   - The runtime will `eval` the code before agent starts; the code must return tool definitions.
+ * - Startup tool existence is NOT statically validated here (runtime responsibility).
  *
- * Conflict errors (throws):
- * 1) YAML metadata conflicts with heading-derived values for: title, description, avatar, system, rules
- *    - Comparison is case-insensitive and ignores surrounding whitespace.
- * 2) allow conflicts with deny
- *    - If allow is a list (not "*") and any ability overlaps deny (exact match) -> error
- *    - If deny contains "*" -> error (invalid)
- *
- * Ability validation (throws):
- * - Abilities must be one of: fs, network, sh, tool, mcp, browser, env
- * - Scoped abilities allowed only for `sh:<command>` (e.g. sh:gh, sh:ls)
- * - Keys and values are processed case-insensitively
- *
- * Defaults:
- * - version: 0.1.0
- * - icon: 🤖
- * - status: active
- * - limits: { time_per_message: "5m", max_files_changed: 100 }
- * - allow: "*"
- * - deny: ""
- * - system default: content under "## System" if exists otherwise description if exists otherwise title
+ * Still enforced (throws):
+ * - YAML keys are case-insensitive.
+ * - YAML vs heading-derived conflicts for: title, description, avatar, system, rules
+ *   (case-insensitive, trimmed).
+ * - allow vs deny conflicts (optional extension) + ability validation (case-insensitive).
  */
 
 import matter from "gray-matter";
 import { unified } from "unified";
 import remarkParse from "remark-parse";
 import { visit } from "unist-util-visit";
-import type { Root, Content, Paragraph, Image, Text, Heading } from "mdast";
+import type { Root, Paragraph, Image, Text, Heading, Content } from "mdast";
 
 export type AgentStatus = "active" | "deprecated" | "disabled";
-export type AgentCapability = string;
+
+export type AgentRecommended = {
+  models?: string[];
+  capabilities?: string[];
+};
+
+export type AgentRequired = {
+  env?: string[];
+  startup?: string; // tool name to call after tools code eval
+};
 
 const BASE_ABILITIES = ["fs", "network", "sh", "tool", "mcp", "browser", "env"] as const;
 type BaseAbility = (typeof BASE_ABILITIES)[number];
-
-// We store abilities in canonical lower-case form (base + optional scope)
 export type CanonicalAbility = `${BaseAbility}` | `sh:${string}`;
-
-export type AgentRecommendedRequired = {
-  models?: string[];
-  capabilities?: AgentCapability[];
-};
-
-export type AgentLimits = {
-  time_per_message: string; // "5m"
-  max_files_changed: number; // 100
-};
-
-// Frontmatter keys are treated case-insensitively; we normalize them.
-export type AgentFrontmatter = Partial<{
-  version: string;
-  icon: string;
-  title: string;
-  description: string;
-  tags: string[];
-  roles: string[];
-  avatar: string;
-  system: string;
-  recommended: AgentRecommendedRequired;
-  required: AgentRecommendedRequired;
-  allow: "*" | "" | false | string[] | string;
-  deny: "" | false | string[] | string;
-  limits: Partial<AgentLimits>;
-  status: AgentStatus;
-  rules: string;
-  policies: string[] | string;
-}>;
 
 export type AgentDefinition = {
   version: string;
   icon: string;
   title: string;
   description: string;
-  tags: string[];
-  roles: string[];
-  avatar?: string;
-  system: string;
-  recommended: AgentRecommendedRequired;
-  required: AgentRecommendedRequired;
-  allow: "*" | CanonicalAbility[];
-  deny: CanonicalAbility[];
-  limits: AgentLimits;
   status: AgentStatus;
-  rules: string;
-  policies: string[];
-};
 
-const DEFAULTS = {
-  version: "0.1.0",
-  icon: "🤖",
-  status: "active" as AgentStatus,
-  limits: { time_per_message: "5m", max_files_changed: 100 } as AgentLimits,
-  allow: "*" as const,
-  deny: [] as CanonicalAbility[],
-  tags: [] as string[],
-  roles: [] as string[],
-  recommended: {} as AgentRecommendedRequired,
-  required: {} as AgentRecommendedRequired,
-  policies: [] as string[],
-  rules: "",
+  recommended: AgentRecommended;
+  required: AgentRequired;
+
+  // Resolved from headings/defaults
+  system: string;
+  rules: string;
+  avatar?: string;
+
+  // Tools code is extracted but NOT parsed
+  tools?: {
+    code: string; // JS code from ## Tools fenced block
+    language: "js" | "javascript";
+    runtime_validation_required: boolean; // always true when required.startup is set
+  };
+
+  // optional extension (only if present in YAML)
+  allow?: "*" | CanonicalAbility[];
+  deny?: CanonicalAbility[];
 };
 
 class AgentParseError extends Error {
@@ -121,28 +77,19 @@ class AgentParseError extends Error {
   }
 }
 
-function normStr(s: unknown): string {
-  return String(s ?? "").trim();
+function normStr(v: unknown): string {
+  return String(v ?? "").trim();
 }
-function normCmp(s: unknown): string {
-  return normStr(s).toLowerCase();
+function normCmp(v: unknown): string {
+  return normStr(v).toLowerCase();
 }
 
-/** Normalize object keys to lower-case (1 level deep), preserving values. */
-function lowerKeys<T extends Record<string, any>>(obj: any): T {
-  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return (obj ?? {}) as T;
+/** Lower-case object keys (shallow), preserving values. */
+function lowerKeys(obj: any): Record<string, any> {
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return {};
   const out: Record<string, any> = {};
   for (const [k, v] of Object.entries(obj)) out[String(k).toLowerCase()] = v;
-  return out as T;
-}
-
-function normalizeFrontmatterKeys(raw: any): AgentFrontmatter {
-  const fm = lowerKeys<AgentFrontmatter>(raw ?? {});
-  // Also normalize nested keys for recommended/required/limits (they're small objects)
-  if (fm.recommended) fm.recommended = lowerKeys(fm.recommended as any);
-  if (fm.required) fm.required = lowerKeys(fm.required as any);
-  if (fm.limits) fm.limits = lowerKeys(fm.limits as any);
-  return fm;
+  return out;
 }
 
 function mdText(node: any): string {
@@ -172,6 +119,73 @@ function stringifyNode(node: any): string {
   return "";
 }
 
+/**
+ * Returns the markdown text content after a heading until the next heading with depth <= headingDepth.
+ * Heading matching is case-insensitive.
+ *
+ * NOTE: This returns a stringified markdown-ish representation (good enough for system/rules/tools extraction).
+ */
+function getSectionAfterHeading(ast: Root, headingText: string, headingDepth: number): string | undefined {
+  const nodes = ast.children;
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    if (n.type !== "heading") continue;
+
+    const h = n as Heading;
+    const t = h.children.map(mdText).join("").trim();
+
+    if (h.depth === headingDepth && t.toLowerCase() === headingText.toLowerCase()) {
+      const parts: string[] = [];
+      for (let j = i + 1; j < nodes.length; j++) {
+        const m = nodes[j];
+        if (m.type === "heading") {
+          const hh = m as Heading;
+          if (hh.depth <= headingDepth) break;
+        }
+        parts.push(stringifyNode(m));
+      }
+      const out = parts.join("\n").trim();
+      return out.length ? out : undefined;
+    }
+  }
+  return undefined;
+}
+
+function findFirstImageInSection(ast: Root, headingText: string, headingDepth: number): string | undefined {
+  const nodes = ast.children;
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    if (n.type !== "heading") continue;
+
+    const h = n as Heading;
+    const t = h.children.map(mdText).join("").trim();
+
+    if (h.depth === headingDepth && t.toLowerCase() === headingText.toLowerCase()) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const m = nodes[j];
+        if (m.type === "heading") {
+          const hh = m as Heading;
+          if (hh.depth <= headingDepth) break;
+        }
+        let found: string | undefined;
+        visit(m, "image", (img: Image) => {
+          if (!found) found = img.url;
+        });
+        if (found) return found;
+      }
+    }
+  }
+  return undefined;
+}
+
+function extractFirstJsFence(sectionText: string): { lang: "js" | "javascript"; code: string } | undefined {
+  const re = /```(js|javascript)\s*\n([\s\S]*?)\n```/i;
+  const m = re.exec(sectionText);
+  if (!m?.[1] || !m?.[2]) return undefined;
+  const lang = m[1].toLowerCase() as "js" | "javascript";
+  return { lang, code: m[2].trim() };
+}
+
 type Extracted = {
   firstH1Title?: string;
   firstParagraphAfterH1?: string;
@@ -179,63 +193,16 @@ type Extracted = {
   avatarFromBodyStart?: string;
   systemSection?: string;
   rulesSection?: string;
+  toolsFence?: { lang: "js" | "javascript"; code: string };
 };
 
 function extractFromMarkdown(body: string): Extracted {
   const ast = unified().use(remarkParse).parse(body) as Root;
   const extracted: Extracted = {};
 
+  // First H1 title + first paragraph after it
   let sawFirstH1 = false;
   let afterFirstH1 = false;
-
-  const captureSection = (headingText: string, headingDepth: number): string | undefined => {
-    const nodes = ast.children;
-    for (let i = 0; i < nodes.length; i++) {
-      const n = nodes[i];
-      if (n.type !== "heading") continue;
-      const h = n as Heading;
-      const t = h.children.map(mdText).join("").trim();
-      if (h.depth === headingDepth && t.toLowerCase() === headingText.toLowerCase()) {
-        const parts: string[] = [];
-        for (let j = i + 1; j < nodes.length; j++) {
-          const m = nodes[j];
-          if (m.type === "heading") {
-            const hh = m as Heading;
-            if (hh.depth <= headingDepth) break;
-          }
-          parts.push(stringifyNode(m));
-        }
-        const out = parts.join("\n").trim();
-        return out.length ? out : undefined;
-      }
-    }
-    return undefined;
-  };
-
-  const findFirstImageInSection = (headingText: string, headingDepth: number): string | undefined => {
-    const nodes = ast.children;
-    for (let i = 0; i < nodes.length; i++) {
-      const n = nodes[i];
-      if (n.type !== "heading") continue;
-      const h = n as Heading;
-      const t = h.children.map(mdText).join("").trim();
-      if (h.depth === headingDepth && t.toLowerCase() === headingText.toLowerCase()) {
-        for (let j = i + 1; j < nodes.length; j++) {
-          const m = nodes[j];
-          if (m.type === "heading") {
-            const hh = m as Heading;
-            if (hh.depth <= headingDepth) break;
-          }
-          let found: string | undefined;
-          visit(m, "image", (img: Image) => {
-            if (!found) found = img.url;
-          });
-          if (found) return found;
-        }
-      }
-    }
-    return undefined;
-  };
 
   for (let i = 0; i < ast.children.length; i++) {
     const n = ast.children[i];
@@ -259,32 +226,57 @@ function extractFromMarkdown(body: string): Extracted {
       continue;
     }
 
+    // Avatar from body start: first image before first H1
     if (!sawFirstH1 && !extracted.avatarFromBodyStart) {
       let found: string | undefined;
-      visit(n, "image", (img: Image) => {
+      visit(n as Content, "image", (img: Image) => {
         if (!found) found = img.url;
       });
       if (found) extracted.avatarFromBodyStart = found;
     }
   }
 
-  extracted.avatarFromAvatarSection = findFirstImageInSection("Avatar", 1);
-  extracted.systemSection = captureSection("System", 2);
-  extracted.rulesSection = captureSection("Rules", 2);
+  extracted.avatarFromAvatarSection = findFirstImageInSection(ast, "Avatar", 1);
+  extracted.systemSection = getSectionAfterHeading(ast, "System", 2);
+  extracted.rulesSection = getSectionAfterHeading(ast, "Rules", 2);
+
+  const toolsSection = getSectionAfterHeading(ast, "Tools", 2);
+  if (toolsSection) {
+    const fence = extractFirstJsFence(toolsSection);
+    if (fence) extracted.toolsFence = fence;
+  }
 
   return extracted;
 }
 
-function normalizePolicies(policies: AgentFrontmatter["policies"]): string[] {
-  if (!policies) return [];
-  if (Array.isArray(policies)) return policies.map(String).map((s) => s.trim()).filter(Boolean);
-  return String(policies)
+function assertNoYamlHeadingConflicts(params: { yamlValue?: string; inferredValue?: string; keyName: string }) {
+  const { yamlValue, inferredValue, keyName } = params;
+  if (!yamlValue || !inferredValue) return;
+  if (normCmp(yamlValue) !== normCmp(inferredValue)) {
+    throw new AgentParseError(
+      `Conflict for "${keyName}": YAML value "${normStr(yamlValue)}" differs from heading-derived value "${normStr(
+        inferredValue
+      )}".`
+    );
+  }
+}
+
+function normalizeStatus(v: unknown): AgentStatus {
+  const s = normStr(v || "active").toLowerCase();
+  if (s === "active" || s === "deprecated" || s === "disabled") return s;
+  throw new AgentParseError(`Invalid status "${normStr(v)}". Allowed: active, deprecated, disabled.`);
+}
+
+function normalizeStringList(v: unknown): string[] {
+  if (!v) return [];
+  if (Array.isArray(v)) return v.map((x) => normStr(x)).filter(Boolean);
+  return normStr(v)
     .split(/\r?\n|,/)
     .map((s) => s.trim())
     .filter(Boolean);
 }
 
-/** Validate and canonicalize ability strings; throws on invalid values. */
+/** Ability validation (optional extension) */
 export function validateAndNormalizeAbilities(
   input: "*" | "" | false | string[] | string | undefined,
   fieldName: "allow" | "deny"
@@ -305,14 +297,10 @@ export function validateAndNormalizeAbilities(
     const v = raw.trim();
     if (!v) continue;
 
-    const lower = v.toLowerCase();
-
-    // Disallow "*" inside deny list items or allow list items other than the special "*" value
-    if (lower === "*") {
-      throw new AgentParseError(`Invalid ability "*" inside ${fieldName} list. Use ${fieldName}: "*" only as a single scalar.`);
+    if (v === "*") {
+      throw new AgentParseError(`Invalid ability "*" inside ${fieldName} list. Use ${fieldName}: "*" as a scalar only.`);
     }
 
-    // Parse base[:scope]
     const m = /^([a-z]+)(?::([a-z0-9._-]+))?$/i.exec(v);
     if (!m) throw new AgentParseError(`Invalid ability syntax in ${fieldName}: "${v}"`);
 
@@ -325,160 +313,140 @@ export function validateAndNormalizeAbilities(
       );
     }
 
-    // Scoped abilities: currently only sh:<command>
     if (scope) {
       if (base !== "sh") {
         throw new AgentParseError(`Scoped ability is only allowed for "sh:<command>". Invalid: "${v}"`);
       }
       out.push(`sh:${scope.toLowerCase()}`);
-      continue;
+    } else {
+      out.push(base as CanonicalAbility);
     }
-
-    out.push(base as CanonicalAbility);
   }
 
-  // Deduplicate
   return Array.from(new Set(out));
 }
 
-/** Throw if YAML and heading-derived values conflict (case-insensitive). */
-function assertNoYamlHeadingConflicts(params: {
-  yamlValue?: string;
-  inferredValue?: string;
-  keyName: string;
-}) {
-  const { yamlValue, inferredValue, keyName } = params;
-  if (!yamlValue || !inferredValue) return;
-  if (normCmp(yamlValue) !== normCmp(inferredValue)) {
-    throw new AgentParseError(
-      `Conflict for "${keyName}": YAML value "${normStr(yamlValue)}" differs from heading-derived value "${normStr(inferredValue)}".`
-    );
-  }
-}
-
-/** Throw if allow/deny conflict (exact overlap when allow is list). */
 function assertNoAllowDenyConflicts(allow: "*" | CanonicalAbility[], deny: CanonicalAbility[]) {
-  // deny "*" is already prevented by validator
-  if (allow === "*") return; // allow-all + deny-some is valid and intended
-
+  if (allow === "*") return; // allow-all with deny-some is valid
   const allowSet = new Set(allow);
   const conflicts = deny.filter((d) => allowSet.has(d));
   if (conflicts.length) {
-    throw new AgentParseError(
-      `allow/deny conflict: abilities present in both allow and deny: ${conflicts.join(", ")}`
-    );
+    throw new AgentParseError(`allow/deny conflict: abilities present in both allow and deny: ${conflicts.join(", ")}`);
   }
-
-  // Optional: prevent nonsensical "deny: sh" while allowing sh:gh etc (policy doesn’t mandate this).
-  // Keep strict only for exact matches per your requirement.
 }
 
 export function parseAgentMarkdown(fileContent: string): AgentDefinition {
   const parsed = matter(fileContent);
-  const fm = normalizeFrontmatterKeys(parsed.data || {});
-  const body = parsed.content ?? "";
 
+  // YAML keys are case-insensitive
+  const fm = lowerKeys(parsed.data || {});
+
+  // Nested keys in recommended/required should also be treated case-insensitively
+  const recommendedRaw = lowerKeys(fm["recommended"] || {});
+  const requiredRaw = lowerKeys(fm["required"] || {});
+
+  const body = parsed.content ?? "";
   const extracted = extractFromMarkdown(body);
 
-  // Conflicts: YAML vs headings-derived (case-insensitive)
-  // Allowed heading sources per policy: first H1 title, first paragraph after H1, # Avatar image, ## System, ## Rules
-  assertNoYamlHeadingConflicts({ keyName: "title", yamlValue: fm.title, inferredValue: extracted.firstH1Title });
+  // Conflicts: YAML vs heading-derived (case-insensitive)
+  assertNoYamlHeadingConflicts({ keyName: "title", yamlValue: fm["title"], inferredValue: extracted.firstH1Title });
   assertNoYamlHeadingConflicts({
     keyName: "description",
-    yamlValue: fm.description,
+    yamlValue: fm["description"],
     inferredValue: extracted.firstParagraphAfterH1,
   });
   assertNoYamlHeadingConflicts({
     keyName: "avatar",
-    yamlValue: fm.avatar,
+    yamlValue: fm["avatar"],
     inferredValue: extracted.avatarFromAvatarSection ?? extracted.avatarFromBodyStart,
   });
-  assertNoYamlHeadingConflicts({ keyName: "system", yamlValue: fm.system, inferredValue: extracted.systemSection });
-  assertNoYamlHeadingConflicts({ keyName: "rules", yamlValue: fm.rules, inferredValue: extracted.rulesSection });
+  assertNoYamlHeadingConflicts({ keyName: "system", yamlValue: fm["system"], inferredValue: extracted.systemSection });
+  assertNoYamlHeadingConflicts({ keyName: "rules", yamlValue: fm["rules"], inferredValue: extracted.rulesSection });
 
-  const title = normStr(fm.title) || normStr(extracted.firstH1Title) || "Untitled Agent";
-  const description = normStr(fm.description) || normStr(extracted.firstParagraphAfterH1) || "";
+  const version = normStr(fm["version"]) || "0.1.0";
+  const icon = normStr(fm["icon"]) || "🤖";
+  const status = normalizeStatus(fm["status"]);
 
-  // avatar default:
-  // 1) YAML avatar
-  // 2) first image under "# Avatar"
-  // 3) first image at start of body
+  const title = normStr(fm["title"]) || normStr(extracted.firstH1Title) || "Untitled Agent";
+  const description = normStr(fm["description"]) || normStr(extracted.firstParagraphAfterH1) || "";
+
   const avatar =
-    normStr(fm.avatar) ||
+    normStr(fm["avatar"]) ||
     normStr(extracted.avatarFromAvatarSection) ||
     normStr(extracted.avatarFromBodyStart) ||
     undefined;
 
-  // rules default: YAML rules else content under "## Rules" else ""
-  const rules = normStr(fm.rules) || normStr(extracted.rulesSection) || DEFAULTS.rules;
+  const rules = normStr(fm["rules"]) || normStr(extracted.rulesSection) || "";
 
-  // system default order you specified:
-  // 1) content after "## System" heading (if exists)
-  // 2) description if exists
+  // System message resolution per policy:
+  // 1) content under ## System
+  // 2) description (resolved)
   // 3) title
-  const system = normStr(extracted.systemSection) || normStr(fm.system) || description || title;
+  const system = normStr(extracted.systemSection) || description || title;
 
-  const version = normStr(fm.version) || DEFAULTS.version;
-  const icon = normStr(fm.icon) || DEFAULTS.icon;
-
-  const statusRaw = normStr(fm.status) || DEFAULTS.status;
-  const status = (statusRaw.toLowerCase() as AgentStatus) ?? DEFAULTS.status;
-  if (!["active", "deprecated", "disabled"].includes(status)) {
-    throw new AgentParseError(`Invalid status "${statusRaw}". Allowed: active, deprecated, disabled.`);
-  }
-
-  const tags = Array.isArray(fm.tags) ? fm.tags.map((s) => normStr(s)).filter(Boolean) : DEFAULTS.tags;
-  const roles = Array.isArray(fm.roles) ? fm.roles.map((s) => normStr(s)).filter(Boolean) : DEFAULTS.roles;
-
-  const recommended = (fm.recommended ?? DEFAULTS.recommended) as AgentRecommendedRequired;
-  const required = (fm.required ?? DEFAULTS.required) as AgentRecommendedRequired;
-
-  // Abilities: validate + canonicalize
-  const allow = validateAndNormalizeAbilities(fm.allow, "allow");
-  const deny = validateAndNormalizeAbilities(fm.deny, "deny");
-  if (deny === "*") {
-    // Our validator prevents this, but keep guard.
-    throw new AgentParseError(`deny: "*" is not allowed. Deny must be a list or empty.`);
-  }
-  assertNoAllowDenyConflicts(allow, deny as CanonicalAbility[]);
-
-  // limits defaults
-  const limits: AgentLimits = {
-    time_per_message: normStr(fm.limits?.time_per_message) || DEFAULTS.limits.time_per_message,
-    max_files_changed: Number(fm.limits?.max_files_changed ?? DEFAULTS.limits.max_files_changed),
+  const recommended: AgentRecommended = {
+    models: Array.isArray(recommendedRaw["models"]) ? recommendedRaw["models"].map(normStr).filter(Boolean) : undefined,
+    capabilities: Array.isArray(recommendedRaw["capabilities"])
+      ? recommendedRaw["capabilities"].map(normStr).filter(Boolean)
+      : undefined,
   };
-  if (!Number.isFinite(limits.max_files_changed) || limits.max_files_changed < 0) {
-    throw new AgentParseError(`limits.max_files_changed must be a non-negative number.`);
-  }
-  if (!limits.time_per_message) {
-    throw new AgentParseError(`limits.time_per_message must be a non-empty string (e.g. "5m").`);
+
+  const required: AgentRequired = {
+    env: normalizeStringList(requiredRaw["env"]),
+    startup: normStr(requiredRaw["startup"]) || undefined,
+  };
+
+  // Tools: extract JS fence under ## Tools (no parsing)
+  let tools: AgentDefinition["tools"] | undefined;
+  if (extracted.toolsFence) {
+    tools = {
+      code: extracted.toolsFence.code,
+      language: extracted.toolsFence.lang,
+      runtime_validation_required: Boolean(required.startup),
+    };
+  } else if (required.startup) {
+    // required.startup implies Tools should exist; keep this strict.
+    throw new AgentParseError(`required.startup is set to "${required.startup}" but no "## Tools" JS code fence was found.`);
   }
 
-  const policies = normalizePolicies(fm.policies);
+  // Optional extension: allow/deny if present in YAML (keys case-insensitive)
+  const hasAllow = "allow" in fm;
+  const hasDeny = "deny" in fm;
+  let allow: "*" | CanonicalAbility[] | undefined;
+  let deny: CanonicalAbility[] | undefined;
+
+  if (hasAllow || hasDeny) {
+    const allowNorm = validateAndNormalizeAbilities(fm["allow"], "allow");
+    const denyNorm = validateAndNormalizeAbilities(fm["deny"], "deny");
+    if (denyNorm === "*") {
+      throw new AgentParseError(`deny: "*" is not allowed.`);
+    }
+    assertNoAllowDenyConflicts(allowNorm, denyNorm as CanonicalAbility[]);
+    allow = allowNorm;
+    deny = denyNorm as CanonicalAbility[];
+  }
 
   return {
     version,
     icon,
     title,
     description,
-    tags,
-    roles,
-    avatar,
-    system,
+    status,
     recommended,
     required,
-    allow,
-    deny: deny as CanonicalAbility[],
-    limits,
-    status,
+    system,
     rules,
-    policies,
+    avatar,
+    ...(tools ? { tools } : {}),
+    ...(allow !== undefined ? { allow } : {}),
+    ...(deny !== undefined ? { deny } : {}),
   };
 }
 
 // Example CLI usage:
-//   node parse-agent.js agents/backend_api-coder.agent.md
+//   node parse-agent.js agents/policies_policy-auditor.agent.md
 if (require.main === module) {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const fs = require("node:fs");
   const path = process.argv[2];
   if (!path) {
