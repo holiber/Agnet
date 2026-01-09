@@ -1,5 +1,32 @@
 # Setup tests
 
+The repo should have next commands for test running in the package.json
+
+```json
+{
+  "scripts": {
+    "test": "pnpm run test:unit && pnpm run test:e2e",
+
+    "test:unit": "vitest run tests/unit --exclude tests/unit/integration",
+    "test:unit:integration": "vitest run tests/unit/integration",
+
+    "test:e2e": "playwright test tests/e2e --ignore tests/e2e/integration",
+    "test:e2e:integration": "playwright test tests/e2e/integration",
+
+    "test:scenario:smoke": "SCENARIO_MODE=smoke node scripts/run-scenarios.mjs --no-integration",
+    "test:scenario:userlike": "SCENARIO_MODE=userlike node scripts/run-scenarios.mjs --no-integration",
+    "test:scenario:userlike:web": "SCENARIO_MODE=userlike node scripts/run-scenarios.mjs --web --no-integration",
+    "test:scenario:userlike:web:mobile": "SCENARIO_MODE=userlike node scripts/run-scenarios.mjs --web --mobile --no-integration",
+
+    "test:scenario:integration": "SCENARIO_MODE=smoke node scripts/run-scenarios.mjs --integration",
+
+    "test:integration": "pnpm run test:unit:integration && pnpm run test:e2e:integration && pnpm run test:scenario:integration"
+  }
+}
+
+
+```
+
 ## utils
 ```ts
 // tests/test-utils.ts
@@ -208,7 +235,6 @@ export async function userType(
 ## Scenario test runner
 
 ```mjs
-
 // scripts/run-scenarios.mjs
 import fs from "node:fs";
 import path from "node:path";
@@ -218,6 +244,7 @@ import { performance } from "node:perf_hooks";
 const ROOT = process.cwd();
 const SCENARIO_DIR = path.join(ROOT, "tests", "scenario");
 
+// mode
 const MODE = process.env.SCENARIO_MODE === "smoke" ? "smoke" : "userlike";
 
 // smoke logs
@@ -233,6 +260,8 @@ const argv = process.argv.slice(2);
 const onlyWeb = argv.includes("--web");
 const onlyCli = argv.includes("--cli");
 const mobile = argv.includes("--mobile");
+const onlyIntegration = argv.includes("--integration");
+const noIntegration = argv.includes("--no-integration");
 
 // If neither specified, run both
 const runWeb = onlyCli ? false : true;
@@ -241,6 +270,7 @@ const runCli = onlyWeb ? false : true;
 function mkdirp(p) {
   fs.mkdirSync(p, { recursive: true });
 }
+
 function resetDirs() {
   if (MODE === "smoke") {
     fs.rmSync(CACHE_DIR, { recursive: true, force: true });
@@ -266,10 +296,21 @@ function isScenarioFile(p) {
   return p.endsWith(".scenario.test.ts") || p.endsWith(".scenario.test.js");
 }
 
+function isIntegrationScenario(file) {
+  const rel = path.relative(SCENARIO_DIR, file).split(path.sep);
+  return rel.includes("integration");
+}
+
 function targetOf(file) {
   const rel = path.relative(SCENARIO_DIR, file).split(path.sep);
-  // tests/scenario/cli/... or tests/scenario/web/...
-  return rel[0] === "cli" ? "cli" : "web";
+
+  // supports:
+  // tests/scenario/cli/...
+  // tests/scenario/web/...
+  // tests/scenario/cli/integration/...
+  // tests/scenario/integration/cli/...
+  if (rel.includes("cli")) return "cli";
+  return "web";
 }
 
 function safeBase(file) {
@@ -321,14 +362,12 @@ function runCliUserlikeWithVideo(file) {
   const castPath = path.join(outDir, `${base}.cast`);
   const mp4Path = path.join(outDir, `${base}.mp4`);
 
-  // asciinema writes a recording of the command in a real pseudo-terminal
   const cmd = [
     "asciinema",
     "rec",
     "--overwrite",
     "-q",
     "-c",
-    // note: SCENARIO_MODE=userlike, and we run ONE file
     `SCENARIO_MODE=userlike pnpm vitest run --config vitest.scenario.config.ts "${file}" --no-threads --single-thread --bail=1`,
     castPath,
   ];
@@ -349,6 +388,11 @@ files = files.filter((f) => {
   const t = targetOf(f);
   if (t === "web" && !runWeb) return false;
   if (t === "cli" && !runCli) return false;
+
+  const integ = isIntegrationScenario(f);
+  if (onlyIntegration && !integ) return false;
+  if (noIntegration && integ) return false;
+
   return true;
 });
 
@@ -362,10 +406,16 @@ let passed = 0;
 const started = performance.now();
 
 for (const file of files) {
-  const target = targetOf(file);
   const base = safeBase(file);
+  const integ = isIntegrationScenario(file);
 
-  // SMOKE: redirect output to per-file log
+  // fail early if integration scenario is run without secrets
+  if (integ && !process.env.OPENAI_API_KEY) {
+    process.stdout.write(`FAILED: ${file}\n`);
+    process.stdout.write(`missing required env: OPENAI_API_KEY\n`);
+    process.exit(1);
+  }
+
   if (MODE === "smoke") {
     const logPath = path.join(CACHE_DIR, `${base}.log`);
     const fd = fs.openSync(logPath, "w");
@@ -374,8 +424,6 @@ for (const file of files) {
       file,
       env: {
         SCENARIO_MODE: "smoke",
-        // mobile/desktop doesn't matter in smoke unless you want it;
-        // keep default desktop or pass if needed
         SCENARIO_WEB_DEVICE: mobile ? "mobile" : "desktop",
       },
       stdio: ["ignore", fd, fd],
@@ -396,8 +444,7 @@ for (const file of files) {
   }
 
   // USERLIKE
-  if (target === "cli") {
-    // CLI userlike video via asciinema
+  if (targetOf(file) === "cli") {
     const res = runCliUserlikeWithVideo(file);
     if (!res.ok) {
       const elapsed = ((performance.now() - started) / 1000).toFixed(2);
@@ -411,7 +458,6 @@ for (const file of files) {
     continue;
   }
 
-  // WEB userlike video via Playwright recordVideo
   const webOutDir = path.join(WEB_VIDEO_ROOT, base);
   mkdirp(webOutDir);
 
@@ -439,6 +485,5 @@ for (const file of files) {
 const elapsed = ((performance.now() - started) / 1000).toFixed(2);
 process.stdout.write(`passed ${passed}/${total} in ${elapsed}s\n`);
 process.exit(0);
-
 
 ```
