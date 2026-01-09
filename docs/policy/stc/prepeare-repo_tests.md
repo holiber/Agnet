@@ -5,7 +5,7 @@ The repo should have next commands for test running in the package.json
 ```json
 {
   "scripts": {
-    "test": "pnpm run test:unit && pnpm run test:e2e",
+    "test": "npm run test:unit && npm run test:e2e",
 
     "test:unit": "vitest run tests/unit --exclude tests/unit/integration",
     "test:unit:integration": "vitest run tests/unit/integration",
@@ -20,10 +20,12 @@ The repo should have next commands for test running in the package.json
 
     "test:scenario:integration": "SCENARIO_MODE=smoke node scripts/run-scenarios.mjs --integration",
 
-    "test:integration": "pnpm run test:unit:integration && pnpm run test:e2e:integration && pnpm run test:scenario:integration"
+    "test:scenario:list": "node scripts/run-scenarios.mjs --list",
+    "test:scenario:integration:list": "node scripts/run-scenarios.mjs --integration --list",
+
+    "test:integration": "npm run test:unit:integration && npm run test:e2e:integration && npm run test:scenario:integration"
   }
 }
-
 
 ```
 
@@ -262,8 +264,12 @@ const argv = process.argv.slice(2);
 const onlyWeb = argv.includes("--web");
 const onlyCli = argv.includes("--cli");
 const mobile = argv.includes("--mobile");
+
 const onlyIntegration = argv.includes("--integration");
 const noIntegration = argv.includes("--no-integration");
+
+const listOnly = argv.includes("--list");
+const dryRun = argv.includes("--dry-run");
 
 // If neither specified, run both
 const runWeb = onlyCli ? false : true;
@@ -274,6 +280,9 @@ function mkdirp(p) {
 }
 
 function resetDirs() {
+  // In list/dry-run mode, do not touch filesystem (no logs/artifacts folders).
+  if (listOnly || dryRun) return;
+
   if (MODE === "smoke") {
     fs.rmSync(CACHE_DIR, { recursive: true, force: true });
     mkdirp(CACHE_DIR);
@@ -323,6 +332,8 @@ function safeBase(file) {
 }
 
 function runVitestOneFile({ file, env, stdio }) {
+  if (dryRun) return { status: 0 };
+
   const cmd = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
   const args = [
     "vitest",
@@ -343,6 +354,8 @@ function runVitestOneFile({ file, env, stdio }) {
 
 // cast -> mp4 via agg + ffmpeg
 function convertCastToMp4(castPath, mp4Path) {
+  if (dryRun) return true;
+
   const gifPath = mp4Path.replace(/\.mp4$/, ".gif");
 
   let r = spawnSync("agg", [castPath, gifPath], { stdio: "inherit" });
@@ -359,26 +372,51 @@ function convertCastToMp4(castPath, mp4Path) {
 function runCliUserlikeWithVideo(file) {
   const base = safeBase(file);
   const outDir = path.join(CLI_VIDEO_ROOT, base);
-  mkdirp(outDir);
+
+  if (!dryRun) mkdirp(outDir);
 
   const castPath = path.join(outDir, `${base}.cast`);
   const mp4Path = path.join(outDir, `${base}.mp4`);
 
+  // asciinema writes a recording of the command in a real pseudo-terminal
   const cmd = [
     "asciinema",
     "rec",
     "--overwrite",
     "-q",
     "-c",
+    // note: SCENARIO_MODE=userlike, and we run ONE file
     `SCENARIO_MODE=userlike pnpm vitest run --config vitest.scenario.config.ts "${file}" --no-threads --single-thread --bail=1`,
     castPath,
   ];
+
+  if (dryRun) return { ok: true, outDir, castPath, mp4Path };
 
   const r = spawnSync(cmd[0], cmd.slice(1), { stdio: "inherit" });
   if (r.status !== 0) return { ok: false, outDir };
 
   const okMp4 = convertCastToMp4(castPath, mp4Path);
   return { ok: okMp4, outDir, castPath, mp4Path };
+}
+
+function relToRoot(file) {
+  return path.relative(ROOT, file).split(path.sep).join("/");
+}
+
+function printPlan(files) {
+  // One-line header: useful for CI debug
+  process.stdout.write(
+    `mode=${MODE} web=${runWeb ? "on" : "off"} cli=${runCli ? "on" : "off"} mobile=${
+      mobile ? "on" : "off"
+    } integration=${onlyIntegration ? "only" : noIntegration ? "off" : "mixed"}\n`
+  );
+
+  for (const file of files) {
+    const target = targetOf(file);
+    const integ = isIntegrationScenario(file);
+    const tag = integ ? "integration" : "regular";
+    process.stdout.write(`[${target}] [${tag}] ${relToRoot(file)}\n`);
+  }
 }
 
 // main
@@ -399,6 +437,13 @@ files = files.filter((f) => {
 });
 
 const total = files.length;
+
+if (listOnly) {
+  // List and exit 0
+  printPlan(files);
+  process.exit(0);
+}
+
 if (total === 0) {
   process.stdout.write("passed 0/0 in 0.00s\n");
   process.exit(0);
@@ -408,17 +453,32 @@ let passed = 0;
 const started = performance.now();
 
 for (const file of files) {
+  const target = targetOf(file);
   const base = safeBase(file);
   const integ = isIntegrationScenario(file);
 
-  // fail early if integration scenario is run without secrets
+  // Fail early for integration runs when required secrets are missing.
+  // In dry-run we only report, not fail.
   if (integ && !process.env.OPENAI_API_KEY) {
-    process.stdout.write(`FAILED: ${file}\n`);
-    process.stdout.write(`missing required env: OPENAI_API_KEY\n`);
-    process.exit(1);
+    if (dryRun) {
+      process.stdout.write(
+        `WARN: integration scenario would require env: OPENAI_API_KEY (${relToRoot(file)})\n`
+      );
+    } else {
+      process.stdout.write(`FAILED: ${file}\n`);
+      process.stdout.write(`missing required env: OPENAI_API_KEY\n`);
+      process.exit(1);
+    }
   }
 
+  // SMOKE: redirect output to per-file log
   if (MODE === "smoke") {
+    if (dryRun) {
+      process.stdout.write(`[dry-run] would run: ${relToRoot(file)}\n`);
+      passed += 1;
+      continue;
+    }
+
     const logPath = path.join(CACHE_DIR, `${base}.log`);
     const fd = fs.openSync(logPath, "w");
 
@@ -446,7 +506,7 @@ for (const file of files) {
   }
 
   // USERLIKE
-  if (targetOf(file) === "cli") {
+  if (target === "cli") {
     const res = runCliUserlikeWithVideo(file);
     if (!res.ok) {
       const elapsed = ((performance.now() - started) / 1000).toFixed(2);
@@ -460,8 +520,9 @@ for (const file of files) {
     continue;
   }
 
+  // WEB userlike video via Playwright recordVideo
   const webOutDir = path.join(WEB_VIDEO_ROOT, base);
-  mkdirp(webOutDir);
+  if (!dryRun) mkdirp(webOutDir);
 
   const r = runVitestOneFile({
     file,
@@ -487,5 +548,6 @@ for (const file of files) {
 const elapsed = ((performance.now() - started) / 1000).toFixed(2);
 process.stdout.write(`passed ${passed}/${total} in ${elapsed}s\n`);
 process.exit(0);
+
 
 ```
