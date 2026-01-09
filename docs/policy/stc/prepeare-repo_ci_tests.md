@@ -5,7 +5,7 @@ test unit (npm run test:unit)
 test e2e (npm run test:e2e)
 test smoke (npm run test:scenario:smoke)
 
-## Github Config example
+## Github Config example for non-gated tests
 
 ```yml
 name: CI
@@ -85,5 +85,61 @@ jobs:
           path: .cache/smokecheck
       # actions/upload-artifact v4 is the supported version. :contentReference[oaicite:2]{index=2}
 
+
+```
+
+## Config example for integration (gated) tests
+
+```yml
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  integration-tests:
+    name: Integration tests (gated)
+    runs-on: ubuntu-latest
+
+    # 🔒 Gate: secrets are only available after approval
+    environment: integration-tests
+
+    # ❗ Do not auto-run for fork PRs
+    if: >
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # --- Optional: show what will run before executing ---
+      - name: List integration scenarios
+        run: npm run test:scenario:integration:list
+
+      # --- Run all integration tests ---
+      - name: Run integration tests
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CURSOR_TOKEN: ${{ secrets.CURSOR_TOKEN }}
+          GITHUB_TEST_TOKEN: ${{ secrets.GITHUB_TEST_TOKEN }}
+          JIRA_TOKEN: ${{ secrets.JIRA_TOKEN }}
+        run: npm run test:integration
 
 ```
