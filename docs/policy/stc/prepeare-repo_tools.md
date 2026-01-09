@@ -1,9 +1,20 @@
 # Это политика для разворачивания нового репозитория или для адаптирования уже существующего репозитория
 
 
-Должны быть установлены
-vitest - для unit тестов
-playwright - для e2e тестов
+| Package      | Required             | Why                     |
+| ------------ | -------------------- | ----------------------- |
+| `vitest`     | ✅                    | Test runner             |
+| `playwright` | ✅ (if web scenarios) | Web automation + video  |
+| `node-pty`   | ✅ (if CLI scenarios) | Real terminal behavior  |
+| `cross-env`  | ⚠️        | Cross-platform env vars |
+| `typescript` | ✅ (if TS)            | TypeScript support      |
+
+| Tool                | Required          | Why                      |
+| ------------------- | ----------------- | ------------------------ |
+| `asciinema`         | ✅ (CLI user-like) | Terminal video recording |
+| `agg`               | ⚠️     | cast → gif               |
+| `ffmpeg`            | ⚠️     | gif → mp4                |
+| Playwright browsers | ✅ (web)           | Chromium/WebKit/Firefox  |
 
 
 
