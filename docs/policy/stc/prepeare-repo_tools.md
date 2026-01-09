@@ -1,5 +1,8 @@
-# Это политика для разворачивания нового репозитория или для адаптирования уже существующего репозитория
+# The prepeare-repo section
 
+This section have policies that should be applied to repo before starting the works 
+
+There is some packages should be installed after applying all the policies:
 
 | Package      | Required             | Why                     |
 | ------------ | -------------------- | ----------------------- |
@@ -17,34 +20,8 @@
 | Playwright browsers | ✅ (web)           | Chromium/WebKit/Firefox  |
 
 
+This is the look of project files and directories shold be in repo after applying all the policies:
 
-
-
-```json
-{
-  "scripts": {
-    // Base tests (NO scenarios)
-    "test": "npm run test:unit && npm run test:e2e",
-
-    "test:unit": "vitest run \"tests/unit/**/*.test.ts\"",
-
-    "test:e2e": "vitest run \"tests/e2e/**/*.e2e.test.ts\"",
-
-    // Scenario tests (separate)
-
-    "test:scenario:smoke": "cross-env SCENARIO_MODE=smoke node scripts/run-scenarios.mjs",
-
-    "test:scenario:userlike": "cross-env SCENARIO_MODE=userlike node scripts/run-scenarios.mjs",
-
-    "test:scenario:userlike:web": "cross-env SCENARIO_MODE=userlike node scripts/run-scenarios.mjs --web",
-
-    "test:scenario:userlike:web:mobile": "cross-env SCENARIO_MODE=userlike node scripts/run-scenarios.mjs --web --mobile"
-  }
-}
-```
-
-
-## Файлы репозитория
 <pre>
 .
 ├── .gitignore
