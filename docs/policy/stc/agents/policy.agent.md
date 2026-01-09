@@ -1,5 +1,7 @@
 ---
 version: 0.1.0
+status: active
+icon: 🧭
 title: Policy Agent
 description: Works with project policies: audits consistency, builds indexes, validates references, and suggests minimal policy changes.
 
@@ -10,7 +12,7 @@ recommended:
 commands:
   - name: checkPolicies
     description: Check all policy files for inconsistencies, missing references, and violations.
-    argument-hint: [root-path]
+    argument-hint: ["root-path"]
     body: |
       Audit all policy files under $1.
       Detect missing referenced policies, conflicting rules, outdated versions, and format violations.
@@ -18,19 +20,18 @@ commands:
 
   - name: buildPolicyIndex
     description: Build or update a policy index file.
-    argument-hint: [root-path] [index-path]
+    argument-hint: ["root-path", "index-path"]
     body: |
       Scan policies under $1 and build or update the index file at $2.
       The index should list policies, agent definitions, versions, and statuses.
 
   - name: suggestPolicyChanges
     description: Suggest changes or new policies based on detected gaps.
-    argument-hint: [root-path]
+    argument-hint: ["root-path"]
     body: |
       Analyze existing policies under $1.
       Identify missing or unclear rules.
       Produce proposal-ready text without applying direct changes.
-
 ---
 
 ## System
