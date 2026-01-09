@@ -2,6 +2,8 @@
 
 The repo should have next labels for tickets (issues)
 
+You can find more info about these labels in the **contributing_issues_labels.md** policy
+
 ### research
 Color: #6F42C1 (purple)
 
