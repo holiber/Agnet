@@ -1,217 +1,119 @@
-# Policy create/change
+---
+version: 0.2.0
+icon: 📜
+tags:
+  - policy
+  - contributing
+title: Policy Change Rules
+description: Defines how policies are created, modified, and versioned.
+---
+
 Purpose
 
-This policy defines how new policies are introduced and how existing policies are modified.
+This policy defines how new policies are created and how existing policies are changed.
 
-Its goal is to keep project governance:
-	•	Clear
-	•	Minimal
-	•	Consistent
-	•	Understandable by humans and AI agents
+Its goal is to keep project governance clear, minimal, consistent, and understandable by both humans and AI agents.
 
 ⸻
 
-When a Policy Change Is Needed
+Policy Language
+	•	Policies must be written in English unless explicitly stated otherwise in the policy index
+	•	Language must be clear, explicit, and deterministic
 
-A policy change is required when:
-	•	A new rule or constraint is introduced
-	•	Existing behavior needs clarification
-	•	AI or human actions require stricter or safer boundaries
-	•	Repeated ambiguity or mistakes are observed
+⸻
+
+When a Policy Change Is Required
+
+A policy proposal is required when:
+	•	Introducing a new policy
+	•	Modifying existing rules or constraints
+	•	Clarifying ambiguous or unsafe behavior
+	•	Adjusting rules that affect AI or human execution
 
 ⸻
 
 Proposal Requirement
 
-Any creation or modification of a policy must start with a proposal.
+All policy changes must start with a proposal.
 
-Rules
+Rules:
 	•	The proposal must use the proposal label
-	•	The proposal may be created by humans or AI agents
+	•	Proposals may be created by humans or AI agents
 	•	AI agents must follow contributing_ai_proposal
 
 ⸻
 
 Policy Text Requirements
 
-Every policy document must follow these rules:
-
-1. Be Minimal and Explicit
-	•	Explain the policy in the shortest form possible
-	•	Avoid unnecessary wording
-	•	Prefer rules over descriptions
-
-2. Be Human- and AI-Readable
-	•	Use simple, direct language
+Each policy must:
+	•	Explain its goal
+	•	Be as short as possible while remaining clear
+	•	Be understandable by humans and AI agents
+	•	Use explicit language (must, must not, should)
 	•	Avoid implicit assumptions
-	•	Avoid metaphors or vague terms
 
-3. Describe the Goal
-
-Each policy must clearly state its goal, explaining:
-	•	What problem it solves
-	•	Why it exists
-
-4. Define Enforced Rules
-	•	Use clear “must / must not / should” language
-	•	Rules must be deterministic and testable
-
-5. Allow Examples When Helpful
-	•	Code examples are allowed if they improve understanding
-	•	Examples must be correct and minimal
-	•	Examples are optional, not required
+Policies are contracts, not recommendations by default.
+If any rule is a recommendation, the policy must explicitly state this.
 
 ⸻
 
-Structure of a Policy Document
+Policy Metadata (Optional)
+
+A policy may include a YAML metadata header at the top of the file.
+
+Supported fields:
+	•	version — policy version (default: 0.1.0)
+	•	icon — single emoji
+	•	tags — list of search tags
+	•	title — human-readable title
+	•	description — short summary
+
+Defaults:
+	•	If title is missing → the first heading is the title
+	•	If description is missing → the first paragraph after the first heading is the description
+
+Metadata must not change or override policy rules.
+
+⸻
+
+Structure of a Policy
 
 Recommended structure:
 
-# Policy Name
+# Policy Title
 
 ## Purpose
-(Why this policy exists)
-
 ## Rules
-(Explicit, enforceable rules)
-
-## Examples (Optional)
-(Minimal examples if needed)
+## Examples (optional)
 
 
 ⸻
 
-Approval & Modification Rules
-	•	Policy changes must be reviewed before adoption
-	•	Policies should not contradict existing policies
-	•	If a conflict is discovered:
-	•	A proposal to resolve the conflict must be created
+Code Examples
+	•	Code examples are allowed
+	•	Examples must be minimal and correct
+	•	Examples must not contradict the rules
+	•	Examples are optional
+
+⸻
+
+Approval & Safety Rules
+	•	Policies must be reviewed before adoption
+	•	Policies must not contradict existing policies
+	•	Conflicts require a new proposal to resolve
 
 ⸻
 
 AI Agent Constraints
-	•	AI agents must not modify policies directly
-	•	AI agents may:
-	•	Propose policy changes
-	•	Suggest clarifications
+	•	AI agents must not modify policy files directly
+	•	AI agents may propose changes or clarifications
 	•	Applying a policy change requires human approval
 
 ⸻
 
 General Principles
-	•	Policies are contracts, not suggestions
+	•	Policies are contracts, not recommendations by default
+	•	Explicit rules are preferred over implicit intent
 	•	Fewer policies are better than many unclear ones
 	•	Clarity is more important than completeness
-	•	If a policy cannot be clearly followed by an AI agent, it must be revised
-
-⸻
-
-If you want next, I can:
-	•	Generate a policy proposal template
-	•	Create a policy linter checklist
-	•	Align this with your other contributing_* documents_policy_change.md
-
-Purpose
-
-This policy defines how new policies are introduced and how existing policies are modified.
-
-Its goal is to keep project governance:
-	•	Clear
-	•	Minimal
-	•	Consistent
-	•	Understandable by humans and AI agents
-
-⸻
-
-When a Policy Change Is Needed
-
-A policy change is required when:
-	•	A new rule or constraint is introduced
-	•	Existing behavior needs clarification
-	•	AI or human actions require stricter or safer boundaries
-	•	Repeated ambiguity or mistakes are observed
-
-⸻
-
-Proposal Requirement
-
-Any creation or modification of a policy must start with a proposal.
-
-Rules
-	•	The proposal must use the proposal label
-	•	The proposal may be created by humans or AI agents
-	•	AI agents must follow contributing_ai_proposal
-
-⸻
-
-Policy Text Requirements
-
-Every policy document must follow these rules:
-
-1. Be Minimal and Explicit
-	•	Explain the policy in the shortest form possible
-	•	Avoid unnecessary wording
-	•	Prefer rules over descriptions
-
-2. Be Human- and AI-Readable
-	•	Use simple, direct language
-	•	Avoid implicit assumptions
-	•	Avoid metaphors or vague terms
-
-3. Describe the Goal
-
-Each policy must clearly state its goal, explaining:
-	•	What problem it solves
-	•	Why it exists
-
-4. Define Enforced Rules
-	•	Use clear “must / must not / should” language
-	•	Rules must be deterministic and testable
-
-5. Allow Examples When Helpful
-	•	Code examples are allowed if they improve understanding
-	•	Examples must be correct and minimal
-	•	Examples are optional, not required
-
-⸻
-
-Structure of a Policy Document
-
-Recommended structure:
-
-# Policy Name
-
-## Purpose
-(Why this policy exists)
-
-## Rules
-(Explicit, enforceable rules)
-
-## Examples (Optional)
-(Minimal examples if needed)
-
-
-⸻
-
-Approval & Modification Rules
-	•	Policy changes must be reviewed before adoption
-	•	Policies should not contradict existing policies
-	•	If a conflict is discovered:
-	•	A proposal to resolve the conflict must be created
-
-⸻
-
-AI Agent Constraints
-	•	AI agents must not modify policies directly
-	•	AI agents may:
-	•	Propose policy changes
-	•	Suggest clarifications
-	•	Applying a policy change requires human approval
-
-⸻
-
-General Principles
-	•	Policies are contracts, not suggestions
-	•	Fewer policies are better than many unclear ones
-	•	Clarity is more important than completeness
-	•	If a policy cannot be clearly followed by an AI agent, it must be 
+	•	If a policy cannot be followed by an AI agent, it must be revised
