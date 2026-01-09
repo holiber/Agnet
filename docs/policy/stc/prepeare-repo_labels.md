@@ -25,7 +25,7 @@ Epic tickets represent large initiatives that consist of multiple tasks and are 
 A task qualifies as an Epic if it can be meaningfully split into staged delivery levels.
 The recommended name for Tiers subtickets:
 
-🧩 <ShortFeatureSlug> T<tier>_<order> <short description>
+🧩 ShortFeatureSlug Ttier_order shortDescription
 
 Example:
 
