@@ -10,7 +10,7 @@ function runCli(args: string[], opts?: { cwd?: string; env?: NodeJS.ProcessEnv }
   const cliPath = path.join(process.cwd(), "bin", "agnet.mjs");
 
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [cliPath, ...args], {
+    const child = spawn(process.execPath, [cliPath, ...args, "--output", "json"], {
       cwd: opts?.cwd ?? process.cwd(),
       env: { ...process.env, ...opts?.env },
       stdio: ["ignore", "pipe", "pipe"]
@@ -30,50 +30,57 @@ test("providers list returns built-in mock-agent", async () => {
   const res = await runCli(["providers", "list", "--json"]);
   expect(res.code).toBe(0);
 
-  const parsed = JSON.parse(res.stdout) as { providers: Array<{ id: string }> };
-  expect(parsed.providers.map((a) => a.id)).toContain("mock-agent");
+  const parsed = JSON.parse(res.stdout) as { ok: true; result: { providers: Array<{ id: string }> } };
+  expect(parsed.result.providers.map((a) => a.id)).toContain("mock-agent");
 });
 
 test("providers describe mock-agent exposes chat skill", async () => {
   const res = await runCli(["providers", "describe", "mock-agent", "--json"]);
   expect(res.code).toBe(0);
 
-  const parsed = JSON.parse(res.stdout) as { provider: { id: string; skills: Array<{ id: string }> } };
-  expect(parsed.provider.id).toBe("mock-agent");
-  expect(parsed.provider.skills.map((s) => s.id)).toContain("chat");
+  const parsed = JSON.parse(res.stdout) as {
+    ok: true;
+    result: { provider: { id: string; skills: Array<{ id: string }> } };
+  };
+  expect(parsed.result.provider.id).toBe("mock-agent");
+  expect(parsed.result.provider.skills.map((s) => s.id)).toContain("chat");
 });
 
 test("chats create/send streams and prints final output", async () => {
   const opened = await runCli(["chats", "create"]);
   expect(opened.code).toBe(0);
-  const chatId = opened.stdout.trim();
+  const openedParsed = JSON.parse(opened.stdout) as { ok: true; result: string };
+  const chatId = openedParsed.result.trim();
   expect(chatId).toMatch(/^chat-\d+-[a-f0-9]+$/);
 
   const res = await runCli(["chats", "send", "--chat", chatId, "--prompt", "hello"]);
   expect(res.code).toBe(0);
-  expect(res.stdout).toBe("MockAgent response #1: hello\n");
+  const sentParsed = JSON.parse(res.stdout) as { ok: true; result: string };
+  expect(sentParsed.result).toBe("MockAgent response #1: hello\n");
 });
 
 test("ask (root command) runs one-shot and prints final output", async () => {
   const res = await runCli(["ask", "hello"]);
   expect(res.code).toBe(0);
-  expect(res.stdout).toBe("MockAgent response #1: hello\n");
+  const parsed = JSON.parse(res.stdout) as { ok: true; result: string };
+  expect(parsed.result).toBe("MockAgent response #1: hello\n");
 });
 
 test("prompt (root command) runs one-shot and prints JSON result", async () => {
   const res = await runCli(["prompt", "hello"]);
   expect(res.code).toBe(0);
 
-  const parsed = JSON.parse(res.stdout) as { text: string; providerId: string; chatId: string };
-  expect(parsed.text).toBe("MockAgent response #1: hello");
-  expect(parsed.providerId).toBe("mock-agent");
-  expect(parsed.chatId).toMatch(/^chat-\d+-[a-f0-9]+$/);
+  const parsed = JSON.parse(res.stdout) as { ok: true; result: { text: string; providerId: string; chatId: string } };
+  expect(parsed.result.text).toBe("MockAgent response #1: hello");
+  expect(parsed.result.providerId).toBe("mock-agent");
+  expect(parsed.result.chatId).toMatch(/^chat-\d+-[a-f0-9]+$/);
 });
 
 test("chats create/send/close replays history across commands", async () => {
   const opened = await runCli(["chats", "create"]);
   expect(opened.code).toBe(0);
-  const chatId = opened.stdout.trim();
+  const openedParsed = JSON.parse(opened.stdout) as { ok: true; result: string };
+  const chatId = openedParsed.result.trim();
   expect(chatId).toMatch(/^chat-\d+-[a-f0-9]+$/);
 
   try {
@@ -86,7 +93,8 @@ test("chats create/send/close replays history across commands", async () => {
       "hello"
     ]);
     expect(send1.code).toBe(0);
-    expect(send1.stdout).toBe("MockAgent response #1: hello\n");
+    const send1Parsed = JSON.parse(send1.stdout) as { ok: true; result: string };
+    expect(send1Parsed.result).toBe("MockAgent response #1: hello\n");
 
     const send2 = await runCli([
       "chats",
@@ -97,18 +105,21 @@ test("chats create/send/close replays history across commands", async () => {
       "world"
     ]);
     expect(send2.code).toBe(0);
-    expect(send2.stdout).toBe("MockAgent response #2: world\n");
+    const send2Parsed = JSON.parse(send2.stdout) as { ok: true; result: string };
+    expect(send2Parsed.result).toBe("MockAgent response #2: world\n");
   } finally {
     const closed = await runCli(["chats", "close", "--chat", chatId]);
     expect(closed.code).toBe(0);
-    expect(closed.stdout.trim()).toBe("ok");
+    const closedParsed = JSON.parse(closed.stdout) as { ok: true; result: string };
+    expect(closedParsed.result).toBe("ok");
   }
 });
 
 test("chats send errors on missing prompt", async () => {
   const opened = await runCli(["chats", "create"]);
   expect(opened.code).toBe(0);
-  const chatId = opened.stdout.trim();
+  const openedParsed = JSON.parse(opened.stdout) as { ok: true; result: string };
+  const chatId = openedParsed.result.trim();
 
   const res = await runCli(["chats", "send", "--chat", chatId]);
   expect(res.code).toBeGreaterThan(0);
@@ -146,25 +157,27 @@ test("providers register supports inline JSON and persists per-cwd", async () =>
     { cwd, env: { OPENAI_API_KEY: "dont-store-me" } }
   );
   expect(reg.code).toBe(0);
-  expect(JSON.parse(reg.stdout)).toEqual({ ok: true, providerId: "registered-foo" });
+  expect(JSON.parse(reg.stdout)).toEqual({ ok: true, result: { ok: true, providerId: "registered-foo" } });
 
   const listed = await runCli(["providers", "list", "--json"], { cwd });
   expect(listed.code).toBe(0);
-  const parsed = JSON.parse(listed.stdout) as { providers: Array<{ id: string }> };
-  expect(parsed.providers.map((a) => a.id)).toContain("registered-foo");
+  const parsed = JSON.parse(listed.stdout) as { ok: true; result: { providers: Array<{ id: string }> } };
+  expect(parsed.result.providers.map((a) => a.id)).toContain("registered-foo");
 
   const described = await runCli(["providers", "describe", "registered-foo", "--json"], { cwd });
   expect(described.code).toBe(0);
-  const desc = JSON.parse(described.stdout) as { provider: { id: string; name: string } };
-  expect(desc.provider.id).toBe("registered-foo");
-  expect(desc.provider.name).toBe("Registered Foo");
+  const desc = JSON.parse(described.stdout) as { ok: true; result: { provider: { id: string; name: string } } };
+  expect(desc.result.provider.id).toBe("registered-foo");
+  expect(desc.result.provider.name).toBe("Registered Foo");
 
   const chat = await runCli(["chats", "create", "--provider", "registered-foo"], { cwd });
   expect(chat.code).toBe(0);
-  const chatId = chat.stdout.trim();
+  const chatParsed = JSON.parse(chat.stdout) as { ok: true; result: string };
+  const chatId = chatParsed.result.trim();
   const sent = await runCli(["chats", "send", "--chat", chatId, "--prompt", "hello"], { cwd });
   expect(sent.code).toBe(0);
-  expect(sent.stdout).toBe("MockAgent response #1: hello\n");
+  const sentParsed = JSON.parse(sent.stdout) as { ok: true; result: string };
+  expect(sentParsed.result).toBe("MockAgent response #1: hello\n");
 });
 
 test("providers register supports --file", async () => {
@@ -183,7 +196,7 @@ test("providers register supports --file", async () => {
 
   const reg = await runCli(["providers", "register", "--file", configPath], { cwd });
   expect(reg.code).toBe(0);
-  expect(JSON.parse(reg.stdout)).toEqual({ ok: true, providerId: "from-file" });
+  expect(JSON.parse(reg.stdout)).toEqual({ ok: true, result: { ok: true, providerId: "from-file" } });
 });
 
 test("providers register supports --files with multiple .agent.mdx files", async () => {
@@ -251,12 +264,12 @@ Chat.
 
   const reg = await runCli(["providers", "register", "--files", aPath, bPath], { cwd });
   expect(reg.code).toBe(0);
-  expect(JSON.parse(reg.stdout)).toEqual({ ok: true, providerIds: ["mdx-a", "mdx-b"] });
+  expect(JSON.parse(reg.stdout)).toEqual({ ok: true, result: { ok: true, providerIds: ["mdx-a", "mdx-b"] } });
 
   const listed = await runCli(["providers", "list", "--json"], { cwd });
   expect(listed.code).toBe(0);
-  const parsed = JSON.parse(listed.stdout) as { providers: Array<{ id: string }> };
-  expect(parsed.providers.map((a) => a.id)).toContain("mdx-a");
-  expect(parsed.providers.map((a) => a.id)).toContain("mdx-b");
+  const parsed = JSON.parse(listed.stdout) as { ok: true; result: { providers: Array<{ id: string }> } };
+  expect(parsed.result.providers.map((a) => a.id)).toContain("mdx-a");
+  expect(parsed.result.providers.map((a) => a.id)).toContain("mdx-b");
 });
 

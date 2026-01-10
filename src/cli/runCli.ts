@@ -14,6 +14,7 @@ function endpointPathTokens(endpointId: string): string[] {
 }
 
 type CliEndpoint = ReturnType<typeof flattenApiSchema>[number];
+type OutputFormat = "text" | "json";
 
 function usage(endpoints: CliEndpoint[]): string {
   const lines: string[] = [];
@@ -38,6 +39,7 @@ function usage(endpoints: CliEndpoint[]): string {
     "",
     "Global options:",
     "  --interactive, -i  Start interactive mode",
+    "  --output <format>  Output format: text (default) or json",
     "",
     "Notes:",
     '  - Use "--help" for this message.'
@@ -275,6 +277,31 @@ async function printStream(iterable: AsyncIterable<unknown>): Promise<void> {
   }
 }
 
+function printUnaryFormatted(result: unknown, output: OutputFormat): void {
+  if (output === "json") {
+    process.stdout.write(JSON.stringify({ ok: true, result }, null, 2) + "\n");
+    return;
+  }
+  printUnary(result);
+}
+
+async function printStreamFormatted(iterable: AsyncIterable<unknown>, output: OutputFormat): Promise<void> {
+  if (output === "text") {
+    await printStream(iterable);
+    return;
+  }
+
+  let combined = "";
+  const nonString: unknown[] = [];
+  for await (const chunk of iterable) {
+    if (typeof chunk === "string") combined += chunk;
+    else if (chunk !== undefined) nonString.push(chunk);
+  }
+
+  const result = nonString.length > 0 ? { text: combined, chunks: nonString } : combined;
+  process.stdout.write(JSON.stringify({ ok: true, result }, null, 2) + "\n");
+}
+
 function getByPath(obj: any, pathTokens: string[]): unknown {
   let cur: any = obj;
   for (const k of pathTokens) cur = cur?.[k];
@@ -339,6 +366,7 @@ async function dispatchOnce(params: {
   publicEndpoints: CliEndpoint[];
   tokens: string[];
   strictExitCode: boolean;
+  output: OutputFormat;
 }): Promise<void> {
   if (params.tokens.length === 0 || params.tokens.includes("--help") || params.tokens.includes("-h")) {
     process.stdout.write(usage(params.publicEndpoints) + "\n");
@@ -363,9 +391,9 @@ async function dispatchOnce(params: {
 
     const res = (fn as (i: unknown) => unknown)(input);
     if (selected.endpoint.pattern === "serverStream" || selected.endpoint.kind === "stream") {
-      await printStream(res as AsyncIterable<unknown>);
+      await printStreamFormatted(res as AsyncIterable<unknown>, params.output);
     } else {
-      printUnary(await Promise.resolve(res));
+      printUnaryFormatted(await Promise.resolve(res), params.output);
     }
   } catch (err) {
     process.stderr.write(toErrorMessage(err) + "\n");
@@ -373,11 +401,43 @@ async function dispatchOnce(params: {
   }
 }
 
+function parseOutputFormat(rawTokens: string[]): { output: OutputFormat; tokens: string[] } {
+  let output: OutputFormat = "text";
+  const tokens = [...rawTokens];
+
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (!t) continue;
+
+    if (t === "--output") {
+      const v = tokens[i + 1];
+      if (!v || v.startsWith("--")) throw new Error("Missing value for --output");
+      if (v !== "text" && v !== "json") throw new Error('Invalid --output: expected "text" or "json"');
+      output = v;
+      tokens.splice(i, 2);
+      i--;
+      continue;
+    }
+
+    if (t.startsWith("--output=")) {
+      const v = t.slice("--output=".length);
+      if (v !== "text" && v !== "json") throw new Error('Invalid --output: expected "text" or "json"');
+      output = v;
+      tokens.splice(i, 1);
+      i--;
+      continue;
+    }
+  }
+
+  return { output, tokens };
+}
+
 async function runInteractive(params: {
   app: unknown;
   endpoints: CliEndpoint[];
   publicEndpoints: CliEndpoint[];
   initialTokens?: string[];
+  output: OutputFormat;
 }): Promise<void> {
   const rl = createInterface({
     input: process.stdin,
@@ -394,7 +454,8 @@ async function runInteractive(params: {
         endpoints: params.endpoints,
         publicEndpoints: params.publicEndpoints,
         tokens: params.initialTokens,
-        strictExitCode: false
+        strictExitCode: false,
+        output: params.output
       });
     }
 
@@ -424,7 +485,8 @@ async function runInteractive(params: {
         endpoints: params.endpoints,
         publicEndpoints: params.publicEndpoints,
         tokens,
-        strictExitCode: false
+        strictExitCode: false,
+        output: params.output
       });
     }
   } finally {
@@ -447,7 +509,19 @@ export async function runCli(argv: string[]): Promise<void> {
 
   const rawTokens = argv.slice(2);
   const interactive = rawTokens.includes("--interactive") || rawTokens.includes("-i");
-  const tokens = rawTokens.filter((t) => t !== "--interactive" && t !== "-i");
+  const tokensWithoutInteractive = rawTokens.filter((t) => t !== "--interactive" && t !== "-i");
+
+  let output: OutputFormat = "text";
+  let tokens: string[] = tokensWithoutInteractive;
+  try {
+    const parsed = parseOutputFormat(tokensWithoutInteractive);
+    output = parsed.output;
+    tokens = parsed.tokens;
+  } catch (err) {
+    process.stderr.write(toErrorMessage(err) + "\n");
+    process.exitCode = 1;
+    return;
+  }
 
   if (tokens[0] === "tui") {
     try {
@@ -460,10 +534,10 @@ export async function runCli(argv: string[]): Promise<void> {
   }
 
   if (interactive) {
-    await runInteractive({ app, endpoints, publicEndpoints, initialTokens: tokens.length > 0 ? tokens : undefined });
+    await runInteractive({ app, endpoints, publicEndpoints, initialTokens: tokens.length > 0 ? tokens : undefined, output });
     return;
   }
 
-  await dispatchOnce({ app, endpoints, publicEndpoints, tokens, strictExitCode: true });
+  await dispatchOnce({ app, endpoints, publicEndpoints, tokens, strictExitCode: true, output });
 }
 
