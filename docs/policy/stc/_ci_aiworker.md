@@ -270,20 +270,21 @@ Safety:
 
 ⸻
 
-Next expansion (what we add after minimal works)
+### Cursor cloud agents api online docs and openapi schema
+https://cursor.com/docs/cloud-agent/api/endpoints#endpoints
 
-Once minimal wake-up works, we extend in this order:
-	1.	cursor-cli install + caching
-	2.	Start MCP servers + health check report
-	3.	Create/restore state discussion + store state in first message
-	4.	Load rules with loadRules() + publish “available commands”
-	5.	OpenAPIMCP wiring to Cursor Cloud + delegation + sticky links
+https://cursor.com/docs-static/cloud-agents-openapi.yaml
 
-⸻
+^ use this schema for your OpenApiMCP
 
-Если хочешь, я сразу дам v2 этих же файлов, где:
-	•	добавлен cursor-cli cache
-	•	нормальный shouldWakeUpAgent() (парсинг /bigboss do #12, @bigboss /do <link>)
-	•	и “first-run creates discussion + health report” (через GitHub API)
+### Cursor CLI Install
 
-Но текущая версия уже реально запускается и фильтрует команды — это правильный “minimal working start”.
+curl https://cursor.com/install -fsS | bash
+
+Set API key for scripts
+
+export pCURSOR_API_KEY=your_api_key_here
+agent -p "Analyze this code"
+
+docs: https://cursor.com/docs/cli/headless
+Dont forget setup permissions
